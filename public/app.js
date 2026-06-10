@@ -4,13 +4,10 @@ const state = {
   contractorId: "",
   contractorName: "",
   orders: [],
-  allOrders: [],
-  localReady: false,
-  loadingCache: false,
-  financialFilter: "all",
   total: 0,
   page: 1,
   pageSize: 25,
+  financialFilter: "all",
   contractors: [],
 };
 
@@ -36,6 +33,10 @@ function params(base, data = {}) { const url = new URL(base, location.origin); O
 async function api(path) {
   const response = await fetch(path, { cache: "no-store", headers: state.token ? { "x-session-token": state.token } : {} });
   const payload = await response.json();
+  if (response.status === 401) {
+    localStorage.removeItem("merasTrackerSession");
+    throw new Error("انتهت الجلسة، اضغط خروج وادخل من جديد.");
+  }
   if (!response.ok) throw new Error(payload.error || "تعذر قراءة البيانات");
   return payload;
 }
@@ -64,12 +65,12 @@ function renderMetricCards(totals, statusCounts = {}) {
     metric("مؤكد", fmt(statusCounts.confirm?.count || 0), "green"),
   ].join("");
 }
-
 function setFinancialFilter(filter) {
   state.financialFilter = filter;
-  document.querySelectorAll("[data-financial-filter]").forEach(button => {
-    button.classList.toggle("active", button.dataset.financialFilter === filter);
-  });
+  document.querySelectorAll("[data-financial-filter]").forEach(button => button.classList.toggle("active", button.dataset.financialFilter === filter));
+}
+function financialFilterLabel() {
+  return ({ all: "كل أوامر العمل", process: "أوامر تحت الإجراء", paid: "أوامر مدفوعة", remaining: "أوامر فيها متبقي" })[state.financialFilter] || "كل أوامر العمل";
 }
 
 function setLoggedIn(session) {
@@ -83,10 +84,9 @@ function setLoggedIn(session) {
   els.currentSession.textContent = state.admin ? "الأدمن" : state.contractorName;
   document.querySelectorAll(".admin-only").forEach(el => el.style.display = state.admin ? "" : "none");
 }
-
 function logout() {
   localStorage.removeItem("merasTrackerSession");
-  Object.assign(state, { token: "", admin: false, contractorId: "", contractorName: "", orders: [], allOrders: [], localReady: false, loadingCache: false, financialFilter: "all", page: 1 });
+  Object.assign(state, { token: "", admin: false, contractorId: "", contractorName: "", orders: [], total: 0, financialFilter: "all", page: 1 });
   setFinancialFilter("all");
   els.appRoot.classList.add("hidden");
   els.authScreen.classList.remove("hidden");
@@ -110,17 +110,14 @@ async function loginByEmail() {
     }
     setNotice(`تم الدخول: ${state.admin ? "الأدمن" : state.contractorName}`);
     await refreshAll();
-    if (!state.admin) loadContractorOrdersCache(false).catch(err => setNotice(err.message, "error"));
   } catch (error) { setAuthError(error.message); }
 }
-
 async function refreshAll() {
   try {
     state.page = 1;
     await Promise.all([loadDashboard(), loadOrders()]);
   } catch (error) { setNotice(error.message, "error"); }
 }
-
 async function loadDashboard() {
   const payload = await api("/api/dashboard");
   renderMetricCards({ ...payload.totals, totalAmount: "loading", inProcessAmount: "loading", paidAmount: "loading", remainingAmount: "loading" }, payload.totals.byStatus);
@@ -129,95 +126,41 @@ async function loadDashboard() {
   els.alerts.innerHTML = alerts.map(order => `<div class="alert"><b>${escapeHtml(order.number)}</b><small>${order.inProcessAmount > 0 ? `تحت الإجراء: ${fmt(order.inProcessAmount)}` : `متبقي: ${fmt(order.remainingAmount)}`}</small></div>`).join("") || `<div class="alert">لا توجد تنبيهات في آخر الأوامر.</div>`;
   els.lastLoaded.textContent = `آخر قراءة: ${fmtDate(payload.loadedAt)}`;
 }
-
-async function loadContractorOrdersCache(refresh = false) {
-  if (state.admin || !state.contractorId || state.loadingCache) return;
-  state.loadingCache = true;
-  els.pageInfo.textContent = "جاري تجهيز كل أوامر العمل للفلترة السريعة...";
-  try {
-    const payload = await api(params("/api/contractor-orders-cache", { refresh: refresh ? "1" : "" }));
-    state.allOrders = Array.isArray(payload.rows) ? payload.rows : [];
-    state.localReady = true;
-    renderMetricCards(payload.totals, payload.totals.byStatus || {});
-    els.lastLoaded.textContent = `${payload.cached ? "من الذاكرة" : "تم تجهيز أوامر العمل"}: ${fmtDate(payload.loadedAt)}`;
-    state.page = 1;
-    renderLocalOrders();
-  } finally { state.loadingCache = false; }
-}
-
 async function loadOrders() {
-  if (state.localReady) return renderLocalOrders();
-  if (state.financialFilter !== "all" && !state.admin) {
-    await loadContractorOrdersCache(false);
-    return;
-  }
   const offset = (state.page - 1) * state.pageSize;
-  const payload = await api(params("/api/work-orders", { q: els.searchInput.value.trim(), status: els.statusFilter.value, sort: els.sortFilter.value, limit: state.pageSize, offset }));
-  state.orders = payload.rows;
-  state.total = payload.total;
-  renderOrders();
-}
-
-function orderMatches(order) {
-  const q = norm(els.searchInput.value);
-  const project = norm(els.projectFilter.value);
-  const costCenter = norm(els.costCenterFilter.value);
-  if (els.statusFilter.value && order.status !== els.statusFilter.value) return false;
-  if (state.financialFilter === "process" && Number(order.inProcessAmount || 0) <= 0) return false;
-  if (state.financialFilter === "paid" && Number(order.paidAmount || 0) <= 0) return false;
-  if (state.financialFilter === "remaining" && Number(order.remainingAmount || 0) <= 0) return false;
-  if (project && !norm(order.project?.name).includes(project)) return false;
-  if (costCenter && !norm(`${order.costCenterNumber} ${order.costCenterName}`).includes(costCenter)) return false;
-  if (q) {
-    const haystack = [order.number, order.invoiceNumber, order.contractorBill, order.project?.name, order.location?.name, order.costCenterNumber, order.costCenterName].join(" ").toLowerCase();
-    if (!haystack.includes(q)) return false;
-  }
-  return true;
-}
-
-function sortRows(rows) {
-  return [...rows].sort((a, b) => {
-    const sort = els.sortFilter.value;
-    if (sort === "value") return Number(b.totalAmount || 0) - Number(a.totalAmount || 0);
-    if (sort === "remaining") return Number(b.remainingAmount || 0) - Number(a.remainingAmount || 0);
-    if (sort === "paid") return Number(b.paidAmount || 0) - Number(a.paidAmount || 0);
-    return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-  });
-}
-
-function financialFilterLabel() {
-  return ({ all: "كل أوامر العمل", process: "أوامر تحت الإجراء", paid: "أوامر مدفوعة", remaining: "أوامر فيها متبقي" })[state.financialFilter] || "كل أوامر العمل";
-}
-
-function renderLocalOrders() {
-  const filtered = sortRows(state.allOrders.filter(orderMatches));
-  state.total = filtered.length;
-  const pages = Math.max(Math.ceil(state.total / state.pageSize), 1);
-  if (state.page > pages) state.page = pages;
-  const start = (state.page - 1) * state.pageSize;
-  state.orders = filtered.slice(start, start + state.pageSize);
+  const endpoint = state.financialFilter === "all" ? "/api/work-orders" : "/api/work-orders-financial";
+  const payload = await api(params(endpoint, {
+    q: els.searchInput.value.trim(),
+    status: els.statusFilter.value,
+    project: els.projectFilter.value.trim(),
+    costCenter: els.costCenterFilter.value.trim(),
+    sort: els.sortFilter.value,
+    financial: state.financialFilter,
+    limit: state.pageSize,
+    offset,
+  }));
+  state.orders = payload.rows || [];
+  state.total = payload.total || 0;
   renderOrders(financialFilterLabel());
 }
-
 function renderOrders(scopeLabel = "") {
   els.ordersRows.innerHTML = state.orders.map(order => `<tr><td><button class="linkish" data-open-order="${order.id}">${escapeHtml(order.number)}</button></td><td>${statusChip(order)}</td><td>${escapeHtml(order.project.name)}</td><td>${escapeHtml(order.location.name || "-")}</td><td>${escapeHtml(order.costCenterNumber)}<br><small>${escapeHtml(order.costCenterName)}</small></td><td>${escapeHtml(order.invoiceNumber || order.contractorBill || "-")}</td><td class="amount">${fmt(order.totalAmount)}</td><td class="amount">${fmt(order.inProcessAmount)}</td><td class="amount">${fmt(order.paidAmount)}</td><td class="amount">${fmt(order.remainingAmount)}</td><td>${fmtDate(order.updatedAt)}</td></tr>`).join("");
   els.ordersCards.innerHTML = state.orders.map(order => `<article class="card" data-open-order="${order.id}"><div class="card-head"><b>${escapeHtml(order.number)}</b>${statusChip(order)}</div><small>${escapeHtml(order.project.name)} - ${escapeHtml(order.location.name || "-")}</small>${moneyRow(order)}</article>`).join("");
   const pages = Math.max(Math.ceil(state.total / state.pageSize), 1);
+  if (state.page > pages) state.page = pages;
   const prefix = scopeLabel ? `${scopeLabel} - ` : "";
   els.pageInfo.textContent = `${prefix}صفحة ${state.page} من ${pages} - الإجمالي ${fmt(state.total)}`;
   els.prevPageBtn.disabled = state.page <= 1;
   els.nextPageBtn.disabled = state.page >= pages;
 }
-
 async function openOrder(orderId) {
-  const detail = state.orders.find(item => String(item.id) === String(orderId)) || state.allOrders.find(item => String(item.id) === String(orderId));
+  const detail = state.orders.find(item => String(item.id) === String(orderId));
   if (!detail) return;
   const payments = await api(params("/api/payments", { taskId: detail.id })).catch(() => ({ rows: [] }));
   els.drawerContent.innerHTML = `<h2>أمر العمل ${escapeHtml(detail.number)}</h2><p>${statusChip(detail)}</p><div class="detail-grid"><div class="detail"><span>المتعهد</span><b>${escapeHtml(detail.contractor.name)}</b></div><div class="detail"><span>المشروع</span><b>${escapeHtml(detail.project.name)}</b></div><div class="detail"><span>الموقع</span><b>${escapeHtml(detail.location.name || "-")}</b></div><div class="detail"><span>مركز التكلفة</span><b>${escapeHtml(detail.costCenterNumber || "-")}</b></div><div class="detail"><span>الفاتورة</span><b>${escapeHtml(detail.invoiceNumber || detail.contractorBill || "-")}</b></div><div class="detail"><span>آخر تحديث</span><b>${fmtDate(detail.updatedAt)}</b></div></div><h3>الملخص المالي</h3>${moneyRow(detail)}<h3>دفعات / شروط الدفع</h3><div class="order-list">${payments.rows.map(row => `<div class="mini-order"><b>دفعة ${escapeHtml(row.payment_number || "-")}</b><small>${escapeHtml(row.payment_term || "-")} - ${escapeHtml(row.payment_type || row.payment || "-")}</small></div>`).join("") || `<div class="alert">لا توجد دفعات مقروءة لهذا الأمر.</div>`}</div>`;
   els.drawer.classList.add("open");
   els.drawerBackdrop.classList.add("open");
 }
-
 function closeDrawer() { els.drawer.classList.remove("open"); els.drawerBackdrop.classList.remove("open"); }
 function switchView(view) {
   document.querySelectorAll(".view").forEach(item => item.classList.remove("active"));
@@ -225,31 +168,25 @@ function switchView(view) {
   document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.view === view));
   els.pageTitle.textContent = ({ dashboard: "لوحة المتابعة", orders: "أوامر العمل", contractors: "المتعهدين" })[view];
 }
-
 async function loadContractors() {
   const payload = await api(params("/api/contractors", { q: els.contractorSearch?.value || "" }));
   state.contractors = payload.rows;
   els.contractorRows.innerHTML = payload.rows.map(item => `<tr><td>${escapeHtml(item.name)}<br><small>ID: ${item.id}</small></td><td><code>${escapeHtml(item.portalEmail)}</code></td><td>${fmt(item.workOrders)}</td></tr>`).join("");
 }
-
 function exportEmails() {
   const rows = [["contractor_id", "contractor_name", "portal_email", "work_orders"], ...state.contractors.map(item => [item.id, item.name, item.portalEmail, item.workOrders])];
   const csv = rows.map(row => row.map(value => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a"); link.href = url; link.download = "meras-contractor-emails.csv"; link.click(); URL.revokeObjectURL(url);
 }
-
-function refilterOrders() {
-  state.page = 1;
-  loadOrders();
-}
+function refilterOrders() { state.page = 1; loadOrders(); }
 
 document.querySelectorAll(".nav-item").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 els.authLoginBtn.addEventListener("click", loginByEmail);
 els.authAdminBtn.addEventListener("click", loginByEmail);
 els.authEmail.addEventListener("keydown", e => { if (e.key === "Enter") loginByEmail(); });
 els.logoutBtn.addEventListener("click", logout);
-els.refreshBtn.addEventListener("click", () => { state.localReady = false; state.allOrders = []; refreshAll().then(() => loadContractorOrdersCache(true)); });
+els.refreshBtn.addEventListener("click", refreshAll);
 els.prevPageBtn.addEventListener("click", () => { if (state.page > 1) { state.page -= 1; loadOrders(); } });
 els.nextPageBtn.addEventListener("click", () => { const pages = Math.max(Math.ceil(state.total / state.pageSize), 1); if (state.page < pages) { state.page += 1; loadOrders(); } });
 els.searchContractorsBtn.addEventListener("click", loadContractors);
@@ -276,6 +213,5 @@ document.body.addEventListener("click", event => { const open = event.target.clo
     setLoggedIn(saved);
     if (state.admin) await loadContractors();
     await refreshAll();
-    if (!state.admin) loadContractorOrdersCache(false).catch(err => setNotice(err.message, "error"));
   } catch (error) { logout(); setAuthError(error.message); }
 })();
