@@ -1,0 +1,6 @@
+$env:ODOO_URL = "https://cubesteam-ardanoholding.odoo.com"
+$env:ODOO_DB = "cubesteam-ardanoholding-live-10270445"
+$env:ODOO_LOGIN = "readonly-user@example.com"
+$env:ODOO_API_KEY = "paste-readonly-api-key-here"
+$env:ODOO_COMPANY_ID = "5"
+$env:PORT = "4185"
