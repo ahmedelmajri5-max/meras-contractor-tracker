@@ -55,12 +55,12 @@
             <input id="projectFilter" placeholder="المشروع" />
             <input id="costCenterFilter" placeholder="مركز التكلفة" />
             <select id="sortFilter"><option value="latest">آخر تحديث</option><option value="value">أعلى قيمة</option><option value="remaining">أكبر متبقي</option><option value="paid">أعلى مدفوع</option></select>
-            <label class="check"><input id="processOnly" type="checkbox" /> تحت الإجراء</label>
-            <label class="check"><input id="paidOnly" type="checkbox" /> مدفوع فقط</label>
-            <label class="check"><input id="remainingOnly" type="checkbox" /> متبقي فقط</label>
-            <input id="processMin" type="number" min="0" placeholder="تحت الإجراء من" />
-            <input id="paidMin" type="number" min="0" placeholder="مدفوع من" />
-            <input id="remainingMin" type="number" min="0" placeholder="متبقي من" />
+            <div class="filter-tabs" id="financialFilterTabs" aria-label="فلترة مالية">
+              <button type="button" class="filter-tab active" data-financial-filter="all">الكل</button>
+              <button type="button" class="filter-tab" data-financial-filter="process">تحت الإجراء</button>
+              <button type="button" class="filter-tab" data-financial-filter="paid">المدفوع</button>
+              <button type="button" class="filter-tab" data-financial-filter="remaining">المتبقي</button>
+            </div>
           </div>
           <div class="table-wrap"><table><thead><tr><th>أمر العمل</th><th>الحالة</th><th>المشروع</th><th>الموقع</th><th>مركز التكلفة</th><th>الفاتورة</th><th>الإجمالي</th><th>تحت الإجراء</th><th>المدفوع</th><th>المتبقي</th><th>آخر تحديث</th></tr></thead><tbody id="ordersRows"></tbody></table></div>
           <div class="cards" id="ordersCards"></div>
