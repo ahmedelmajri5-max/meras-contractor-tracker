@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: meras-contractor-tracker
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: "node server.js"
+    envVars:
+      - key: ODOO_URL
+        value: https://cubesteam-ardanoholding.odoo.com
+      - key: ODOO_DB
+        value: cubesteam-ardanoholding-live-10270445
+      - key: ODOO_COMPANY_ID
+        value: "5"
+      - key: ODOO_LOGIN
+        sync: false
+      - key: ODOO_API_KEY
+        sync: false
