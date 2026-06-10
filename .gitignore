@@ -1,0 +1,8 @@
+odoo-readonly.local.ps1
+contractor-orders-cache.json
+contractor-totals-cache.json
+logs/
+*.log
+node_modules/
+.env
+.env.local
