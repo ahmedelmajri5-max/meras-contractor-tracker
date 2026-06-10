@@ -5,8 +5,6 @@ const crypto = require("node:crypto");
 
 const root = __dirname;
 const publicDir = path.join(root, "public");
-const ordersCachePath = path.join(root, "contractor-orders-cache.json");
-
 const config = {
   url: process.env.ODOO_URL || "https://cubesteam-ardanoholding.odoo.com",
   db: process.env.ODOO_DB || "cubesteam-ardanoholding-live-10270445",
@@ -17,57 +15,30 @@ const config = {
 };
 
 const READ_ONLY_METHODS = new Set(["search_read", "search_count", "read_group", "fields_get"]);
-const memoryCache = new Map();
-const sessions = new Map();
+const cache = new Map();
+const orderCache = new Map();
 const CACHE_MS = Number(process.env.ODOO_CACHE_MS || 2 * 60 * 1000);
 const ORDERS_CACHE_MS = Number(process.env.ORDERS_CACHE_MS || 30 * 60 * 1000);
+const TOKEN_SECRET = config.apiKey || "meras-contractor-tracker";
 
 const workOrderFields = [
-  "id",
-  "company_id",
-  "name",
-  "work_order_number",
-  "task_type_work_order",
-  "contractor_id",
-  "project_id",
-  "project_location",
-  "cost_center_number",
-  "analytic_account_id",
-  "bill_number",
-  "contractor_bill",
-  "total_points",
-  "total_payment",
-  "total_payment_request",
-  "date",
-  "approved_date",
-  "confirmed_date",
-  "write_date",
+  "id", "company_id", "name", "work_order_number", "task_type_work_order", "contractor_id",
+  "project_id", "project_location", "cost_center_number", "analytic_account_id", "bill_number",
+  "contractor_bill", "total_points", "total_payment", "total_payment_request", "date",
+  "approved_date", "confirmed_date", "write_date",
 ];
-
-function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
-}
-
-function writeJson(file, value) {
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), "utf8");
-}
 
 function send(res, status, body, type = "application/json; charset=utf-8") {
   res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
   res.end(body);
 }
-
-function json(res, status, payload) {
-  send(res, status, JSON.stringify(payload));
-}
-
+function json(res, status, payload) { send(res, status, JSON.stringify(payload)); }
 function contentType(file) {
   if (file.endsWith(".html")) return "text/html; charset=utf-8";
   if (file.endsWith(".css")) return "text/css; charset=utf-8";
   if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
   return "application/octet-stream";
 }
-
 function number(value) { return Number(value || 0); }
 function text(value) { return String(value || "").trim(); }
 function norm(value) { return text(value).toLowerCase(); }
@@ -75,23 +46,34 @@ function many2one(value) { return Array.isArray(value) ? { id: value[0] ?? null,
 function portalEmailForContractor(id) { return `contractor-${id}@meras.local`; }
 function contractorIdFromPortalEmail(email) { return Number((norm(email).match(/^contractor-(\d+)@meras\.local$/) || [])[1] || 0); }
 function baseDomain(extra = []) { return [["company_id", "=", config.companyId], ...extra]; }
-
-function statusLabel(value) {
-  return ({ draft: "مسودة", approved: "معتمد", confirm: "مؤكد", cancel: "ملغي", done: "مكتمل" })[value] || value || "غير محدد";
-}
-
-function sortOrder(sort) {
-  return ({ latest: "write_date desc", value: "total_points desc", paid: "total_payment desc", date: "date desc, id desc" })[sort] || "write_date desc";
-}
+function statusLabel(value) { return ({ draft: "مسودة", approved: "معتمد", confirm: "مؤكد", cancel: "ملغي", done: "مكتمل" })[value] || value || "غير محدد"; }
+function sortOrder(sort) { return ({ latest: "write_date desc", value: "total_points desc", paid: "total_payment desc", date: "date desc, id desc" })[sort] || "write_date desc"; }
+function parseLimit(url, fallback = 25, max = 200) { return Math.min(Math.max(Number(url.searchParams.get("limit") || fallback), 1), max); }
+function parseOffset(url) { return Math.max(Number(url.searchParams.get("offset") || 0), 0); }
 
 function cacheKey(name, value) { return `${name}:${JSON.stringify(value)}`; }
-async function cached(name, value, fn) {
+async function cached(name, value, fn, ttl = CACHE_MS) {
   const key = cacheKey(name, value);
-  const hit = memoryCache.get(key);
+  const hit = cache.get(key);
   if (hit && hit.expiresAt > Date.now()) return hit.value;
   const result = await fn();
-  memoryCache.set(key, { value: result, expiresAt: Date.now() + CACHE_MS });
+  cache.set(key, { value: result, expiresAt: Date.now() + ttl });
   return result;
+}
+
+function signPayload(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+function verifyToken(token) {
+  const [body, sig] = String(token || "").split(".");
+  if (!body || !sig) return null;
+  const expected = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url");
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  const session = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  if (!session.createdAt || Date.now() - session.createdAt > 12 * 60 * 60 * 1000) return null;
+  return session;
 }
 
 async function rpc(service, method, args) {
@@ -104,7 +86,6 @@ async function rpc(service, method, args) {
   if (!response.ok || payload.error) throw new Error(payload.error?.data?.message || payload.error?.message || response.statusText);
   return payload.result;
 }
-
 async function authenticate() {
   if (!config.login || !config.apiKey) throw new Error("Odoo read-only credentials are not configured.");
   return cached("auth", config.login, async () => {
@@ -113,7 +94,6 @@ async function authenticate() {
     return uid;
   });
 }
-
 async function odooRead(model, method, args = [], kwargs = {}) {
   if (!READ_ONLY_METHODS.has(method)) throw new Error(`Blocked non-read Odoo method: ${method}`);
   const uid = await authenticate();
@@ -155,7 +135,6 @@ function mapWorkOrder(row) {
     currency: "LYD",
   };
 }
-
 function totalsFor(rows) {
   return rows.reduce((acc, order) => {
     acc.count += 1;
@@ -169,9 +148,6 @@ function totalsFor(rows) {
   }, { count: 0, totalAmount: 0, inProcessAmount: 0, paidAmount: 0, remainingAmount: 0, byStatus: {} });
 }
 
-function parseLimit(url, fallback = 25, max = 200) { return Math.min(Math.max(Number(url.searchParams.get("limit") || fallback), 1), max); }
-function parseOffset(url) { return Math.max(Number(url.searchParams.get("offset") || 0), 0); }
-
 async function fetchAllTaskRows(domain, fields, batchSize = 1000) {
   const rows = [];
   for (let offset = 0; ; offset += batchSize) {
@@ -181,7 +157,6 @@ async function fetchAllTaskRows(domain, fields, batchSize = 1000) {
   }
   return rows;
 }
-
 async function resolvePartnerByEmail(email) {
   if (!email) return { found: false };
   const generatedId = contractorIdFromPortalEmail(email);
@@ -193,39 +168,29 @@ async function resolvePartnerByEmail(email) {
       return { found: true, partner: { id: contractor.id, name: contractor.name, email: portalEmailForContractor(contractor.id), workOrders } };
     }
   }
-
-  const partners = await odooRead("res.partner", "search_read", [["|", ["email_normalized", "=", norm(email)], ["email", "ilike", email]]], {
-    fields: ["id", "name", "email", "email_normalized"],
-    limit: 5,
-  });
+  const partners = await odooRead("res.partner", "search_read", [["|", ["email_normalized", "=", norm(email)], ["email", "ilike", email]]], { fields: ["id", "name", "email", "email_normalized"], limit: 5 });
   for (const partner of partners) {
     const count = await odooRead("project.task", "search_count", [baseDomain([["contractor_id", "=", partner.id]])]);
     if (count > 0) return { found: true, partner: { ...partner, workOrders: count } };
   }
   return { found: false, matches: partners };
 }
-
 async function loginWithEmail(url) {
   const email = norm(url.searchParams.get("email"));
   if (email === "admin@meras.local") {
-    const token = crypto.randomBytes(24).toString("hex");
-    sessions.set(token, { role: "admin", email, createdAt: Date.now() });
+    const token = signPayload({ role: "admin", email, createdAt: Date.now() });
     return { ok: true, token, user: { role: "admin", email, name: "MERAAS Admin" } };
   }
   const resolved = await resolvePartnerByEmail(email);
   if (!resolved.found) return { ok: false, error: "Email is not linked to a MERAAS contractor." };
-  const token = crypto.randomBytes(24).toString("hex");
-  sessions.set(token, { role: "contractor", email, contractorId: resolved.partner.id, contractorName: resolved.partner.name, createdAt: Date.now() });
+  const token = signPayload({ role: "contractor", email, contractorId: resolved.partner.id, contractorName: resolved.partner.name, createdAt: Date.now() });
   return { ok: true, token, user: { role: "contractor", email, contractorId: resolved.partner.id, contractorName: resolved.partner.name, workOrders: resolved.partner.workOrders } };
 }
-
 function requireSession(req) {
-  const token = req.headers["x-session-token"];
-  const session = token ? sessions.get(String(token)) : null;
+  const session = verifyToken(req.headers["x-session-token"]);
   if (!session) { const error = new Error("Unauthorized session."); error.status = 401; throw error; }
   return session;
 }
-
 function scopedUrl(url, session) {
   const scoped = new URL(url.toString());
   if (session.role === "contractor") scoped.searchParams.set("contractorId", String(session.contractorId));
@@ -238,36 +203,25 @@ async function getWorkOrders(url) {
   const status = url.searchParams.get("status") || "";
   if (contractorId) domain.push(["contractor_id", "=", contractorId]);
   if (status) domain.push(["task_type_work_order", "=", status]);
-
-  const rows = await odooRead("project.task", "search_read", [domain], {
-    fields: workOrderFields,
-    limit: parseLimit(url),
-    offset: parseOffset(url),
-    order: sortOrder(url.searchParams.get("sort")),
-  });
+  const rows = await odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit: parseLimit(url), offset: parseOffset(url), order: sortOrder(url.searchParams.get("sort")) });
   let mapped = rows.map(mapWorkOrder);
   const q = norm(url.searchParams.get("q"));
   if (q) mapped = mapped.filter(order => [order.number, order.invoiceNumber, order.contractorBill, order.project.name, order.location.name, order.costCenterNumber, order.costCenterName].some(v => norm(v).includes(q)));
   const total = await odooRead("project.task", "search_count", [domain]);
   return { companyId: config.companyId, total, rows: mapped, loadedAt: new Date().toISOString() };
 }
-
 async function getContractorOrdersCache(url) {
   const contractorId = Number(url.searchParams.get("contractorId") || 0);
   const refresh = url.searchParams.get("refresh") === "1";
   if (!contractorId) return { ready: false, rows: [], error: "Missing contractor scope." };
-  const disk = readJson(ordersCachePath, {});
   const key = String(contractorId);
-  const hit = disk[key];
+  const hit = orderCache.get(key);
   if (!refresh && hit && Date.now() - hit.loadedAtMs < ORDERS_CACHE_MS) return { ...hit, cached: true };
-
   const rows = (await fetchAllTaskRows(baseDomain([["contractor_id", "=", contractorId]]), workOrderFields)).map(mapWorkOrder);
   const payload = { ready: true, cached: false, contractorId, rows, totals: totalsFor(rows), loadedAt: new Date().toISOString(), loadedAtMs: Date.now() };
-  disk[key] = payload;
-  writeJson(ordersCachePath, disk);
+  orderCache.set(key, payload);
   return payload;
 }
-
 async function getDashboard(url) {
   const contractorId = Number(url.searchParams.get("contractorId") || 0);
   const extra = contractorId ? [["contractor_id", "=", contractorId]] : [];
@@ -281,10 +235,9 @@ async function getDashboard(url) {
   }
   return { companyId: config.companyId, loadedAt: new Date().toISOString(), totals, latest };
 }
-
 async function getContractors(url) {
   const q = norm(url.searchParams.get("q"));
-  const groups = await cached("contractors", config.companyId, () => odooRead("project.task", "read_group", [baseDomain([["contractor_id", "!=", false]]), ["contractor_id"], ["contractor_id"]], { lazy: false, limit: 5000 }));
+  const groups = await cached("contractors", config.companyId, () => odooRead("project.task", "read_group", [baseDomain([["contractor_id", "!=", false]]), ["contractor_id"], ["contractor_id"]], { lazy: false, limit: 5000 }), 10 * 60 * 1000);
   let rows = groups.map(group => {
     const contractor = many2one(group.contractor_id);
     return { id: contractor.id, name: contractor.name, portalEmail: portalEmailForContractor(contractor.id), workOrders: number(group.contractor_id_count || group.__count) };
@@ -293,7 +246,6 @@ async function getContractors(url) {
   rows.sort((a, b) => b.workOrders - a.workOrders);
   return { companyId: config.companyId, rows, loadedAt: new Date().toISOString() };
 }
-
 async function getPayments(url) {
   const taskId = Number(url.searchParams.get("taskId") || 0);
   const contractorId = Number(url.searchParams.get("contractorId") || 0);
