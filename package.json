@@ -1,0 +1,13 @@
+{
+  "name": "meras-contractor-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only MERAAS contractor tracker connected to Odoo.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
