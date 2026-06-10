@@ -16,29 +16,13 @@ const config = {
 
 const READ_ONLY_METHODS = new Set(["search_read", "search_count", "read_group", "fields_get"]);
 const cache = new Map();
-const orderCache = new Map();
 const CACHE_MS = Number(process.env.ODOO_CACHE_MS || 2 * 60 * 1000);
-const ORDERS_CACHE_MS = Number(process.env.ORDERS_CACHE_MS || 30 * 60 * 1000);
 const TOKEN_SECRET = config.apiKey || "meras-contractor-tracker";
+const workOrderFields = ["id", "company_id", "name", "work_order_number", "task_type_work_order", "contractor_id", "project_id", "project_location", "cost_center_number", "analytic_account_id", "bill_number", "contractor_bill", "total_points", "total_payment", "total_payment_request", "date", "approved_date", "confirmed_date", "write_date"];
 
-const workOrderFields = [
-  "id", "company_id", "name", "work_order_number", "task_type_work_order", "contractor_id",
-  "project_id", "project_location", "cost_center_number", "analytic_account_id", "bill_number",
-  "contractor_bill", "total_points", "total_payment", "total_payment_request", "date",
-  "approved_date", "confirmed_date", "write_date",
-];
-
-function send(res, status, body, type = "application/json; charset=utf-8") {
-  res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
-  res.end(body);
-}
+function send(res, status, body, type = "application/json; charset=utf-8") { res.writeHead(status, { "content-type": type, "cache-control": "no-store" }); res.end(body); }
 function json(res, status, payload) { send(res, status, JSON.stringify(payload)); }
-function contentType(file) {
-  if (file.endsWith(".html")) return "text/html; charset=utf-8";
-  if (file.endsWith(".css")) return "text/css; charset=utf-8";
-  if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
-  return "application/octet-stream";
-}
+function contentType(file) { if (file.endsWith(".html")) return "text/html; charset=utf-8"; if (file.endsWith(".css")) return "text/css; charset=utf-8"; if (file.endsWith(".js")) return "text/javascript; charset=utf-8"; return "application/octet-stream"; }
 function number(value) { return Number(value || 0); }
 function text(value) { return String(value || "").trim(); }
 function norm(value) { return text(value).toLowerCase(); }
@@ -50,8 +34,8 @@ function statusLabel(value) { return ({ draft: "مسودة", approved: "معتم
 function sortOrder(sort) { return ({ latest: "write_date desc", value: "total_points desc", paid: "total_payment desc", date: "date desc, id desc" })[sort] || "write_date desc"; }
 function parseLimit(url, fallback = 25, max = 200) { return Math.min(Math.max(Number(url.searchParams.get("limit") || fallback), 1), max); }
 function parseOffset(url) { return Math.max(Number(url.searchParams.get("offset") || 0), 0); }
-
 function cacheKey(name, value) { return `${name}:${JSON.stringify(value)}`; }
+
 async function cached(name, value, fn, ttl = CACHE_MS) {
   const key = cacheKey(name, value);
   const hit = cache.get(key);
@@ -70,6 +54,7 @@ function verifyToken(token) {
   const [body, sig] = String(token || "").split(".");
   if (!body || !sig) return null;
   const expected = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url");
+  if (Buffer.byteLength(sig) !== Buffer.byteLength(expected)) return null;
   if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   const session = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
   if (!session.createdAt || Date.now() - session.createdAt > 12 * 60 * 60 * 1000) return null;
@@ -77,11 +62,7 @@ function verifyToken(token) {
 }
 
 async function rpc(service, method, args) {
-  const response = await fetch(`${config.url}/jsonrpc`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", method: "call", params: { service, method, args }, id: Date.now() }),
-  });
+  const response = await fetch(`${config.url}/jsonrpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method: "call", params: { service, method, args }, id: Date.now() }) });
   const payload = await response.json();
   if (!response.ok || payload.error) throw new Error(payload.error?.data?.message || payload.error?.message || response.statusText);
   return payload.result;
@@ -110,44 +91,29 @@ function mapWorkOrder(row) {
   const requestedAmount = number(row.total_payment_request);
   const inProcessAmount = Math.max(requestedAmount - paidAmount, 0);
   const remainingAmount = Math.max(totalAmount - paidAmount - inProcessAmount, 0);
-  return {
-    id: row.id,
-    company: many2one(row.company_id),
-    number: row.work_order_number || row.name || String(row.id),
-    status: row.task_type_work_order || "",
-    statusLabel: statusLabel(row.task_type_work_order),
-    contractor,
-    project,
-    location,
-    costCenterNumber: row.cost_center_number || "",
-    costCenterName: analytic.name,
-    invoiceNumber: row.bill_number || "",
-    contractorBill: row.contractor_bill || "",
-    totalAmount,
-    requestedAmount,
-    inProcessAmount,
-    paidAmount,
-    remainingAmount,
-    date: row.date || "",
-    approvedDate: row.approved_date || "",
-    confirmedDate: row.confirmed_date || "",
-    updatedAt: row.write_date || "",
-    currency: "LYD",
-  };
+  return { id: row.id, company: many2one(row.company_id), number: row.work_order_number || row.name || String(row.id), status: row.task_type_work_order || "", statusLabel: statusLabel(row.task_type_work_order), contractor, project, location, costCenterNumber: row.cost_center_number || "", costCenterName: analytic.name, invoiceNumber: row.bill_number || "", contractorBill: row.contractor_bill || "", totalAmount, requestedAmount, inProcessAmount, paidAmount, remainingAmount, date: row.date || "", approvedDate: row.approved_date || "", confirmedDate: row.confirmed_date || "", updatedAt: row.write_date || "", currency: "LYD" };
 }
 function totalsFor(rows) {
-  return rows.reduce((acc, order) => {
-    acc.count += 1;
-    acc.totalAmount += order.totalAmount;
-    acc.inProcessAmount += order.inProcessAmount;
-    acc.paidAmount += order.paidAmount;
-    acc.remainingAmount += order.remainingAmount;
-    acc.byStatus[order.status] = acc.byStatus[order.status] || { status: order.status, label: statusLabel(order.status), count: 0 };
-    acc.byStatus[order.status].count += 1;
-    return acc;
-  }, { count: 0, totalAmount: 0, inProcessAmount: 0, paidAmount: 0, remainingAmount: 0, byStatus: {} });
+  return rows.reduce((acc, order) => { acc.count += 1; acc.totalAmount += order.totalAmount; acc.inProcessAmount += order.inProcessAmount; acc.paidAmount += order.paidAmount; acc.remainingAmount += order.remainingAmount; acc.byStatus[order.status] = acc.byStatus[order.status] || { status: order.status, label: statusLabel(order.status), count: 0 }; acc.byStatus[order.status].count += 1; return acc; }, { count: 0, totalAmount: 0, inProcessAmount: 0, paidAmount: 0, remainingAmount: 0, byStatus: {} });
 }
-
+function rowMatchesText(order, q) {
+  if (!q) return true;
+  return [order.number, order.invoiceNumber, order.contractorBill, order.project.name, order.location.name, order.costCenterNumber, order.costCenterName].some(v => norm(v).includes(q));
+}
+function rowMatchesFinancial(order, financial) {
+  if (financial === "process") return Number(order.inProcessAmount || 0) > 0;
+  if (financial === "paid") return Number(order.paidAmount || 0) > 0;
+  if (financial === "remaining") return Number(order.remainingAmount || 0) > 0;
+  return true;
+}
+function sortRows(rows, sort) {
+  return [...rows].sort((a, b) => {
+    if (sort === "value") return Number(b.totalAmount || 0) - Number(a.totalAmount || 0);
+    if (sort === "remaining") return Number(b.remainingAmount || 0) - Number(a.remainingAmount || 0);
+    if (sort === "paid") return Number(b.paidAmount || 0) - Number(a.paidAmount || 0);
+    return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+  });
+}
 async function fetchAllTaskRows(domain, fields, batchSize = 1000) {
   const rows = [];
   for (let offset = 0; ; offset += batchSize) {
@@ -157,6 +123,7 @@ async function fetchAllTaskRows(domain, fields, batchSize = 1000) {
   }
   return rows;
 }
+
 async function resolvePartnerByEmail(email) {
   if (!email) return { found: false };
   const generatedId = contractorIdFromPortalEmail(email);
@@ -177,10 +144,7 @@ async function resolvePartnerByEmail(email) {
 }
 async function loginWithEmail(url) {
   const email = norm(url.searchParams.get("email"));
-  if (email === "admin@meras.local") {
-    const token = signPayload({ role: "admin", email, createdAt: Date.now() });
-    return { ok: true, token, user: { role: "admin", email, name: "MERAAS Admin" } };
-  }
+  if (email === "admin@meras.local") return { ok: true, token: signPayload({ role: "admin", email, createdAt: Date.now() }), user: { role: "admin", email, name: "MERAAS Admin" } };
   const resolved = await resolvePartnerByEmail(email);
   if (!resolved.found) return { ok: false, error: "Email is not linked to a MERAAS contractor." };
   const token = signPayload({ role: "contractor", email, contractorId: resolved.partner.id, contractorName: resolved.partner.name, createdAt: Date.now() });
@@ -191,36 +155,56 @@ function requireSession(req) {
   if (!session) { const error = new Error("Unauthorized session."); error.status = 401; throw error; }
   return session;
 }
-function scopedUrl(url, session) {
-  const scoped = new URL(url.toString());
-  if (session.role === "contractor") scoped.searchParams.set("contractorId", String(session.contractorId));
-  return scoped;
+function scopedUrl(url, session) { const scoped = new URL(url.toString()); if (session.role === "contractor") scoped.searchParams.set("contractorId", String(session.contractorId)); return scoped; }
+function buildDomainFromUrl(url, extra = []) {
+  const contractorId = Number(url.searchParams.get("contractorId") || 0);
+  const status = url.searchParams.get("status") || "";
+  const project = norm(url.searchParams.get("project"));
+  const costCenter = norm(url.searchParams.get("costCenter"));
+  const domain = baseDomain(extra);
+  if (contractorId) domain.push(["contractor_id", "=", contractorId]);
+  if (status) domain.push(["task_type_work_order", "=", status]);
+  if (project) domain.push(["project_id", "ilike", project]);
+  if (costCenter) domain.push(["cost_center_number", "ilike", costCenter]);
+  return domain;
 }
 
 async function getWorkOrders(url) {
-  const domain = baseDomain();
-  const contractorId = Number(url.searchParams.get("contractorId") || 0);
-  const status = url.searchParams.get("status") || "";
-  if (contractorId) domain.push(["contractor_id", "=", contractorId]);
-  if (status) domain.push(["task_type_work_order", "=", status]);
+  const domain = buildDomainFromUrl(url);
   const rows = await odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit: parseLimit(url), offset: parseOffset(url), order: sortOrder(url.searchParams.get("sort")) });
   let mapped = rows.map(mapWorkOrder);
   const q = norm(url.searchParams.get("q"));
-  if (q) mapped = mapped.filter(order => [order.number, order.invoiceNumber, order.contractorBill, order.project.name, order.location.name, order.costCenterNumber, order.costCenterName].some(v => norm(v).includes(q)));
+  if (q) mapped = mapped.filter(order => rowMatchesText(order, q));
   const total = await odooRead("project.task", "search_count", [domain]);
   return { companyId: config.companyId, total, rows: mapped, loadedAt: new Date().toISOString() };
 }
-async function getContractorOrdersCache(url) {
-  const contractorId = Number(url.searchParams.get("contractorId") || 0);
-  const refresh = url.searchParams.get("refresh") === "1";
-  if (!contractorId) return { ready: false, rows: [], error: "Missing contractor scope." };
-  const key = String(contractorId);
-  const hit = orderCache.get(key);
-  if (!refresh && hit && Date.now() - hit.loadedAtMs < ORDERS_CACHE_MS) return { ...hit, cached: true };
-  const rows = (await fetchAllTaskRows(baseDomain([["contractor_id", "=", contractorId]]), workOrderFields)).map(mapWorkOrder);
-  const payload = { ready: true, cached: false, contractorId, rows, totals: totalsFor(rows), loadedAt: new Date().toISOString(), loadedAtMs: Date.now() };
-  orderCache.set(key, payload);
-  return payload;
+async function getFinancialOrders(url) {
+  const financial = url.searchParams.get("financial") || "all";
+  if (financial === "all") return getWorkOrders(url);
+  const limit = parseLimit(url);
+  const offset = parseOffset(url);
+  const q = norm(url.searchParams.get("q"));
+  const sort = url.searchParams.get("sort");
+  let extra = [];
+  if (financial === "paid") extra = [["total_payment", ">", 0]];
+  if (financial === "process") extra = [["total_payment_request", ">", 0]];
+  if (financial === "remaining") extra = [["total_points", ">", 0]];
+  const domain = buildDomainFromUrl(url, extra);
+
+  if (financial === "paid" && !q && !["remaining"].includes(sort || "")) {
+    const total = await odooRead("project.task", "search_count", [domain]);
+    const rows = await odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit, offset, order: sortOrder(sort) });
+    return { companyId: config.companyId, total, rows: rows.map(mapWorkOrder), loadedAt: new Date().toISOString(), financial };
+  }
+
+  const cacheKeyValue = { domain, financial, q, sort };
+  const filtered = await cached("financial-orders", cacheKeyValue, async () => {
+    const rows = (await fetchAllTaskRows(domain, workOrderFields)).map(mapWorkOrder)
+      .filter(order => rowMatchesFinancial(order, financial))
+      .filter(order => rowMatchesText(order, q));
+    return sortRows(rows, sort);
+  }, 10 * 60 * 1000);
+  return { companyId: config.companyId, total: filtered.length, rows: filtered.slice(offset, offset + limit), loadedAt: new Date().toISOString(), financial };
 }
 async function getDashboard(url) {
   const contractorId = Number(url.searchParams.get("contractorId") || 0);
@@ -238,10 +222,7 @@ async function getDashboard(url) {
 async function getContractors(url) {
   const q = norm(url.searchParams.get("q"));
   const groups = await cached("contractors", config.companyId, () => odooRead("project.task", "read_group", [baseDomain([["contractor_id", "!=", false]]), ["contractor_id"], ["contractor_id"]], { lazy: false, limit: 5000 }), 10 * 60 * 1000);
-  let rows = groups.map(group => {
-    const contractor = many2one(group.contractor_id);
-    return { id: contractor.id, name: contractor.name, portalEmail: portalEmailForContractor(contractor.id), workOrders: number(group.contractor_id_count || group.__count) };
-  }).filter(item => item.id);
+  let rows = groups.map(group => { const contractor = many2one(group.contractor_id); return { id: contractor.id, name: contractor.name, portalEmail: portalEmailForContractor(contractor.id), workOrders: number(group.contractor_id_count || group.__count) }; }).filter(item => item.id);
   if (q) rows = rows.filter(item => norm(item.name).includes(q) || String(item.id).includes(q));
   rows.sort((a, b) => b.workOrders - a.workOrders);
   return { companyId: config.companyId, rows, loadedAt: new Date().toISOString() };
@@ -264,13 +245,10 @@ async function routeApi(req, res, url) {
   const session = requireSession(req);
   const scoped = scopedUrl(url, session);
   if (url.pathname === "/api/work-orders") return json(res, 200, await getWorkOrders(scoped));
-  if (url.pathname === "/api/contractor-orders-cache") return json(res, 200, await getContractorOrdersCache(scoped));
+  if (url.pathname === "/api/work-orders-financial") return json(res, 200, await getFinancialOrders(scoped));
   if (url.pathname === "/api/dashboard") return json(res, 200, await getDashboard(scoped));
   if (url.pathname === "/api/payments") return json(res, 200, await getPayments(scoped));
-  if (url.pathname === "/api/contractors") {
-    if (session.role !== "admin") return json(res, 403, { error: "Admin only." });
-    return json(res, 200, await getContractors(scoped));
-  }
+  if (url.pathname === "/api/contractors") { if (session.role !== "admin") return json(res, 403, { error: "Admin only." }); return json(res, 200, await getContractors(scoped)); }
   return json(res, 404, { error: "API route not found" });
 }
 
@@ -283,9 +261,6 @@ const server = http.createServer(async (req, res) => {
     if (!filePath.startsWith(publicDir)) return send(res, 403, "Forbidden", "text/plain; charset=utf-8");
     if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return send(res, 404, "Not found", "text/plain; charset=utf-8");
     return send(res, 200, fs.readFileSync(filePath), contentType(filePath));
-  } catch (error) {
-    return json(res, error.status || 500, { error: error.message });
-  }
+  } catch (error) { return json(res, error.status || 500, { error: error.message }); }
 });
-
 server.listen(config.port, () => console.log(`MERAAS Contractor Tracker running on http://localhost:${config.port}`));
