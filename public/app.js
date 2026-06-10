@@ -7,6 +7,7 @@ const state = {
   allOrders: [],
   localReady: false,
   loadingCache: false,
+  financialFilter: "all",
   total: 0,
   page: 1,
   pageSize: 25,
@@ -17,7 +18,7 @@ const $ = selector => document.querySelector(selector);
 const els = {
   authScreen: $("#authScreen"), appRoot: $("#appRoot"), authEmail: $("#authEmail"), authLoginBtn: $("#authLoginBtn"), authAdminBtn: $("#authAdminBtn"), authError: $("#authError"),
   pageTitle: $("#pageTitle"), notice: $("#notice"), currentSession: $("#currentSession"), logoutBtn: $("#logoutBtn"), refreshBtn: $("#refreshBtn"), metrics: $("#metrics"), latestOrders: $("#latestOrders"), alerts: $("#alerts"), lastLoaded: $("#lastLoaded"),
-  searchInput: $("#searchInput"), statusFilter: $("#statusFilter"), projectFilter: $("#projectFilter"), costCenterFilter: $("#costCenterFilter"), sortFilter: $("#sortFilter"), processOnly: $("#processOnly"), paidOnly: $("#paidOnly"), remainingOnly: $("#remainingOnly"), processMin: $("#processMin"), paidMin: $("#paidMin"), remainingMin: $("#remainingMin"),
+  searchInput: $("#searchInput"), statusFilter: $("#statusFilter"), projectFilter: $("#projectFilter"), costCenterFilter: $("#costCenterFilter"), sortFilter: $("#sortFilter"), financialFilterTabs: $("#financialFilterTabs"),
   ordersRows: $("#ordersRows"), ordersCards: $("#ordersCards"), prevPageBtn: $("#prevPageBtn"), nextPageBtn: $("#nextPageBtn"), pageInfo: $("#pageInfo"), contractorSearch: $("#contractorSearch"), searchContractorsBtn: $("#searchContractorsBtn"), exportEmailsBtn: $("#exportEmailsBtn"), contractorRows: $("#contractorRows"),
   drawer: $("#drawer"), drawerBackdrop: $("#drawerBackdrop"), drawerContent: $("#drawerContent"), closeDrawer: $("#closeDrawer"),
 };
@@ -47,12 +48,9 @@ function setNotice(message, type = "info") {
   els.notice.style.color = type === "error" ? "#842828" : "#76510c";
 }
 function setAuthError(message) { els.authError.textContent = message || ""; els.authError.style.display = message ? "block" : "none"; }
-
 function statusChip(order) { return `<span class="status ${escapeHtml(order.status)}">${escapeHtml(order.statusLabel)}</span>`; }
 function metric(label, value, color = "") { return `<article class="metric ${color}"><span>${label}</span><b>${value}</b></article>`; }
-function moneyRow(order) {
-  return `<div class="money-row"><span>الإجمالي <b>${fmt(order.totalAmount)}</b></span><span>تحت الإجراء <b>${fmt(order.inProcessAmount)}</b></span><span>المدفوع <b>${fmt(order.paidAmount)}</b></span><span>المتبقي <b>${fmt(order.remainingAmount)}</b></span></div>`;
-}
+function moneyRow(order) { return `<div class="money-row"><span>الإجمالي <b>${fmt(order.totalAmount)}</b></span><span>تحت الإجراء <b>${fmt(order.inProcessAmount)}</b></span><span>المدفوع <b>${fmt(order.paidAmount)}</b></span><span>المتبقي <b>${fmt(order.remainingAmount)}</b></span></div>`; }
 
 function renderMetricCards(totals, statusCounts = {}) {
   els.metrics.innerHTML = [
@@ -65,6 +63,13 @@ function renderMetricCards(totals, statusCounts = {}) {
     metric("معتمد", fmt(statusCounts.approved?.count || 0), "blue"),
     metric("مؤكد", fmt(statusCounts.confirm?.count || 0), "green"),
   ].join("");
+}
+
+function setFinancialFilter(filter) {
+  state.financialFilter = filter;
+  document.querySelectorAll("[data-financial-filter]").forEach(button => {
+    button.classList.toggle("active", button.dataset.financialFilter === filter);
+  });
 }
 
 function setLoggedIn(session) {
@@ -81,7 +86,8 @@ function setLoggedIn(session) {
 
 function logout() {
   localStorage.removeItem("merasTrackerSession");
-  Object.assign(state, { token: "", admin: false, contractorId: "", contractorName: "", orders: [], allOrders: [], localReady: false, page: 1 });
+  Object.assign(state, { token: "", admin: false, contractorId: "", contractorName: "", orders: [], allOrders: [], localReady: false, loadingCache: false, financialFilter: "all", page: 1 });
+  setFinancialFilter("all");
   els.appRoot.classList.add("hidden");
   els.authScreen.classList.remove("hidden");
   switchView("dashboard");
@@ -95,6 +101,7 @@ async function loginByEmail() {
     setAuthError("");
     const payload = await api(params("/api/login", { email }));
     if (!payload.ok) return setAuthError(payload.error || "الإيميل غير مربوط بمتعهد في MERAAS.");
+    setFinancialFilter("all");
     if (payload.user.role === "admin") {
       setLoggedIn({ role: "admin", token: payload.token, email: "admin@meras.local" });
       await loadContractors();
@@ -126,13 +133,13 @@ async function loadDashboard() {
 async function loadContractorOrdersCache(refresh = false) {
   if (state.admin || !state.contractorId || state.loadingCache) return;
   state.loadingCache = true;
-  els.pageInfo.textContent = "جاري تجهيز أوامر العمل للفلترة السريعة...";
+  els.pageInfo.textContent = "جاري تجهيز كل أوامر العمل للفلترة السريعة...";
   try {
     const payload = await api(params("/api/contractor-orders-cache", { refresh: refresh ? "1" : "" }));
     state.allOrders = Array.isArray(payload.rows) ? payload.rows : [];
     state.localReady = true;
     renderMetricCards(payload.totals, payload.totals.byStatus || {});
-    els.lastLoaded.textContent = `${payload.cached ? "من الذاكرة" : "تم تجهيز cache"}: ${fmtDate(payload.loadedAt)}`;
+    els.lastLoaded.textContent = `${payload.cached ? "من الذاكرة" : "تم تجهيز أوامر العمل"}: ${fmtDate(payload.loadedAt)}`;
     state.page = 1;
     renderLocalOrders();
   } finally { state.loadingCache = false; }
@@ -140,6 +147,10 @@ async function loadContractorOrdersCache(refresh = false) {
 
 async function loadOrders() {
   if (state.localReady) return renderLocalOrders();
+  if (state.financialFilter !== "all" && !state.admin) {
+    await loadContractorOrdersCache(false);
+    return;
+  }
   const offset = (state.page - 1) * state.pageSize;
   const payload = await api(params("/api/work-orders", { q: els.searchInput.value.trim(), status: els.statusFilter.value, sort: els.sortFilter.value, limit: state.pageSize, offset }));
   state.orders = payload.rows;
@@ -152,12 +163,9 @@ function orderMatches(order) {
   const project = norm(els.projectFilter.value);
   const costCenter = norm(els.costCenterFilter.value);
   if (els.statusFilter.value && order.status !== els.statusFilter.value) return false;
-  if (els.processOnly.checked && Number(order.inProcessAmount || 0) <= 0) return false;
-  if (els.paidOnly.checked && Number(order.paidAmount || 0) <= 0) return false;
-  if (els.remainingOnly.checked && Number(order.remainingAmount || 0) <= 0) return false;
-  if (Number(els.processMin.value || 0) && Number(order.inProcessAmount || 0) < Number(els.processMin.value)) return false;
-  if (Number(els.paidMin.value || 0) && Number(order.paidAmount || 0) < Number(els.paidMin.value)) return false;
-  if (Number(els.remainingMin.value || 0) && Number(order.remainingAmount || 0) < Number(els.remainingMin.value)) return false;
+  if (state.financialFilter === "process" && Number(order.inProcessAmount || 0) <= 0) return false;
+  if (state.financialFilter === "paid" && Number(order.paidAmount || 0) <= 0) return false;
+  if (state.financialFilter === "remaining" && Number(order.remainingAmount || 0) <= 0) return false;
   if (project && !norm(order.project?.name).includes(project)) return false;
   if (costCenter && !norm(`${order.costCenterNumber} ${order.costCenterName}`).includes(costCenter)) return false;
   if (q) {
@@ -177,19 +185,26 @@ function sortRows(rows) {
   });
 }
 
+function financialFilterLabel() {
+  return ({ all: "كل أوامر العمل", process: "أوامر تحت الإجراء", paid: "أوامر مدفوعة", remaining: "أوامر فيها متبقي" })[state.financialFilter] || "كل أوامر العمل";
+}
+
 function renderLocalOrders() {
   const filtered = sortRows(state.allOrders.filter(orderMatches));
   state.total = filtered.length;
+  const pages = Math.max(Math.ceil(state.total / state.pageSize), 1);
+  if (state.page > pages) state.page = pages;
   const start = (state.page - 1) * state.pageSize;
   state.orders = filtered.slice(start, start + state.pageSize);
-  renderOrders();
+  renderOrders(financialFilterLabel());
 }
 
-function renderOrders() {
+function renderOrders(scopeLabel = "") {
   els.ordersRows.innerHTML = state.orders.map(order => `<tr><td><button class="linkish" data-open-order="${order.id}">${escapeHtml(order.number)}</button></td><td>${statusChip(order)}</td><td>${escapeHtml(order.project.name)}</td><td>${escapeHtml(order.location.name || "-")}</td><td>${escapeHtml(order.costCenterNumber)}<br><small>${escapeHtml(order.costCenterName)}</small></td><td>${escapeHtml(order.invoiceNumber || order.contractorBill || "-")}</td><td class="amount">${fmt(order.totalAmount)}</td><td class="amount">${fmt(order.inProcessAmount)}</td><td class="amount">${fmt(order.paidAmount)}</td><td class="amount">${fmt(order.remainingAmount)}</td><td>${fmtDate(order.updatedAt)}</td></tr>`).join("");
   els.ordersCards.innerHTML = state.orders.map(order => `<article class="card" data-open-order="${order.id}"><div class="card-head"><b>${escapeHtml(order.number)}</b>${statusChip(order)}</div><small>${escapeHtml(order.project.name)} - ${escapeHtml(order.location.name || "-")}</small>${moneyRow(order)}</article>`).join("");
   const pages = Math.max(Math.ceil(state.total / state.pageSize), 1);
-  els.pageInfo.textContent = `صفحة ${state.page} من ${pages} - الإجمالي ${fmt(state.total)}`;
+  const prefix = scopeLabel ? `${scopeLabel} - ` : "";
+  els.pageInfo.textContent = `${prefix}صفحة ${state.page} من ${pages} - الإجمالي ${fmt(state.total)}`;
   els.prevPageBtn.disabled = state.page <= 1;
   els.nextPageBtn.disabled = state.page >= pages;
 }
@@ -224,6 +239,11 @@ function exportEmails() {
   const link = document.createElement("a"); link.href = url; link.download = "meras-contractor-emails.csv"; link.click(); URL.revokeObjectURL(url);
 }
 
+function refilterOrders() {
+  state.page = 1;
+  loadOrders();
+}
+
 document.querySelectorAll(".nav-item").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 els.authLoginBtn.addEventListener("click", loginByEmail);
 els.authAdminBtn.addEventListener("click", loginByEmail);
@@ -236,14 +256,21 @@ els.searchContractorsBtn.addEventListener("click", loadContractors);
 els.exportEmailsBtn.addEventListener("click", exportEmails);
 els.closeDrawer.addEventListener("click", closeDrawer);
 els.drawerBackdrop.addEventListener("click", closeDrawer);
-[els.searchInput, els.statusFilter, els.projectFilter, els.costCenterFilter, els.sortFilter, els.processOnly, els.paidOnly, els.remainingOnly, els.processMin, els.paidMin, els.remainingMin].forEach(control => {
-  control.addEventListener("input", () => { state.page = 1; loadOrders(); });
-  control.addEventListener("change", () => { state.page = 1; loadOrders(); });
+els.financialFilterTabs.addEventListener("click", event => {
+  const button = event.target.closest("[data-financial-filter]");
+  if (!button) return;
+  setFinancialFilter(button.dataset.financialFilter);
+  refilterOrders();
+});
+[els.searchInput, els.statusFilter, els.projectFilter, els.costCenterFilter, els.sortFilter].forEach(control => {
+  control.addEventListener("input", refilterOrders);
+  control.addEventListener("change", refilterOrders);
 });
 document.body.addEventListener("click", event => { const open = event.target.closest("[data-open-order]"); if (open) openOrder(open.dataset.openOrder); });
 
 (async function init() {
   try {
+    setFinancialFilter(state.financialFilter);
     const saved = JSON.parse(localStorage.getItem("merasTrackerSession") || "null");
     if (!saved) return els.authEmail.focus();
     setLoggedIn(saved);
