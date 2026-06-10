@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MERAAS Contractor Tracker</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <section class="login-screen" id="authScreen">
+      <div class="login-card">
+        <div class="brand"><div class="brand-mark">M</div><div><strong>MERAAS</strong><span>Contractor Tracker</span></div></div>
+        <h1>تسجيل دخول المتعهد</h1>
+        <p>ادخل بالإيميل المخصص للمتعهد لعرض أوامر العمل والدفعات الخاصة به فقط.</p>
+        <label>الإيميل<input id="authEmail" type="email" placeholder="contractor-5895@meras.local" autocomplete="email" /></label>
+        <button id="authLoginBtn">دخول المتعهد</button>
+        <button id="authAdminBtn" class="secondary hidden">دخول الأدمن</button>
+        <div class="login-error" id="authError"></div>
+        <small>مصدر البيانات Odoo قراءة فقط. لا يوجد أي تعديل في Odoo.</small>
+      </div>
+    </section>
+
+    <div class="app hidden" id="appRoot">
+      <aside class="sidebar">
+        <div class="brand"><div class="brand-mark">M</div><div><strong>MERAAS</strong><span>Contractor Tracker</span></div></div>
+        <nav>
+          <button class="nav-item active" data-view="dashboard">لوحة المتابعة</button>
+          <button class="nav-item" data-view="orders">أوامر العمل</button>
+          <button class="nav-item admin-only" data-view="contractors">المتعهدين</button>
+        </nav>
+        <div class="readonly-box"><b>Read-only Odoo</b><span>الشركة: MERAAS فقط</span><small>company_id = 5</small></div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div><h1 id="pageTitle">لوحة المتابعة</h1><p>تتبع أوامر العمل والمدفوعات من Odoo بدون أي تعديل.</p></div>
+          <div class="session-panel"><span id="currentSession">-</span><button id="logoutBtn" class="secondary">خروج</button></div>
+        </header>
+
+        <section class="notice" id="notice">التطبيق يقرأ من Odoo فقط. لا توجد أي عمليات إنشاء أو تعديل أو حذف.</section>
+
+        <section class="view active" id="dashboardView">
+          <div class="toolbar"><button id="refreshBtn">تحديث من Odoo</button></div>
+          <div class="metrics" id="metrics"></div>
+          <div class="split">
+            <section class="panel"><div class="panel-head"><h2>آخر أوامر العمل</h2><span id="lastLoaded">-</span></div><div id="latestOrders" class="order-list"></div></section>
+            <section class="panel"><div class="panel-head"><h2>تنبيهات مالية</h2></div><div id="alerts" class="alerts"></div></section>
+          </div>
+        </section>
+
+        <section class="view" id="ordersView">
+          <div class="filters">
+            <input id="searchInput" placeholder="بحث برقم أمر، فاتورة، مشروع، مركز تكلفة..." />
+            <select id="statusFilter"><option value="">كل الحالات</option><option value="draft">مسودة</option><option value="approved">معتمد</option><option value="confirm">مؤكد</option><option value="cancel">ملغي</option><option value="done">مكتمل</option></select>
+            <input id="projectFilter" placeholder="المشروع" />
+            <input id="costCenterFilter" placeholder="مركز التكلفة" />
+            <select id="sortFilter"><option value="latest">آخر تحديث</option><option value="value">أعلى قيمة</option><option value="remaining">أكبر متبقي</option><option value="paid">أعلى مدفوع</option></select>
+            <label class="check"><input id="processOnly" type="checkbox" /> تحت الإجراء</label>
+            <label class="check"><input id="paidOnly" type="checkbox" /> مدفوع فقط</label>
+            <label class="check"><input id="remainingOnly" type="checkbox" /> متبقي فقط</label>
+            <input id="processMin" type="number" min="0" placeholder="تحت الإجراء من" />
+            <input id="paidMin" type="number" min="0" placeholder="مدفوع من" />
+            <input id="remainingMin" type="number" min="0" placeholder="متبقي من" />
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>أمر العمل</th><th>الحالة</th><th>المشروع</th><th>الموقع</th><th>مركز التكلفة</th><th>الفاتورة</th><th>الإجمالي</th><th>تحت الإجراء</th><th>المدفوع</th><th>المتبقي</th><th>آخر تحديث</th></tr></thead><tbody id="ordersRows"></tbody></table></div>
+          <div class="cards" id="ordersCards"></div>
+          <div class="pager"><button id="prevPageBtn" class="secondary">السابق</button><span id="pageInfo">-</span><button id="nextPageBtn" class="secondary">التالي</button></div>
+        </section>
+
+        <section class="view" id="contractorsView">
+          <div class="filters compact"><input id="contractorSearch" placeholder="بحث باسم المتعهد أو ID" /><button id="searchContractorsBtn">بحث</button><button id="exportEmailsBtn" class="secondary">تصدير الإيميلات CSV</button></div>
+          <div class="table-wrap"><table><thead><tr><th>المتعهد</th><th>إيميل الدخول</th><th>عدد الأوامر</th></tr></thead><tbody id="contractorRows"></tbody></table></div>
+        </section>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
+    <aside class="drawer" id="drawer"><button class="close" id="closeDrawer">×</button><div id="drawerContent"></div></aside>
+    <script src="app.js"></script>
+  </body>
+</html>
