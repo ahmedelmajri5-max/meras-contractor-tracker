@@ -31,20 +31,17 @@ function portalEmailForContractor(id) { return `contractor-${id}@meras.local`; }
 function contractorIdFromPortalEmail(email) { return Number((norm(email).match(/^contractor-(\d+)@meras\.local$/) || [])[1] || 0); }
 function baseDomain(extra = []) { return [["company_id", "=", config.companyId], ...extra]; }
 function statusLabel(value) { return ({ draft: "مسودة", approved: "معتمد", confirm: "مؤكد", cancel: "ملغي", done: "مكتمل" })[value] || value || "غير محدد"; }
-function sortOrder(sort) { return ({ latest: "write_date desc", value: "total_points desc", paid: "total_payment desc", date: "date desc, id desc" })[sort] || "write_date desc"; }
+function sortOrder(sort) { return ({ latest: "write_date desc", value: "total_points desc", remaining: "total_points desc", paid: "total_payment desc", date: "date desc, id desc" })[sort] || "write_date desc"; }
 function parseLimit(url, fallback = 25, max = 200) { return Math.min(Math.max(Number(url.searchParams.get("limit") || fallback), 1), max); }
 function parseOffset(url) { return Math.max(Number(url.searchParams.get("offset") || 0), 0); }
-function cacheKey(name, value) { return `${name}:${JSON.stringify(value)}`; }
 
-async function cached(name, value, fn, ttl = CACHE_MS) {
-  const key = cacheKey(name, value);
+async function cached(key, fn, ttl = CACHE_MS) {
   const hit = cache.get(key);
   if (hit && hit.expiresAt > Date.now()) return hit.value;
-  const result = await fn();
-  cache.set(key, { value: result, expiresAt: Date.now() + ttl });
-  return result;
+  const value = await fn();
+  cache.set(key, { value, expiresAt: Date.now() + ttl });
+  return value;
 }
-
 function signPayload(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url");
@@ -69,7 +66,7 @@ async function rpc(service, method, args) {
 }
 async function authenticate() {
   if (!config.login || !config.apiKey) throw new Error("Odoo read-only credentials are not configured.");
-  return cached("auth", config.login, async () => {
+  return cached(`auth:${config.login}`, async () => {
     const uid = await rpc("common", "authenticate", [config.db, config.login, config.apiKey, {}]);
     if (!uid) throw new Error("Odoo authentication failed.");
     return uid;
@@ -82,46 +79,64 @@ async function odooRead(model, method, args = [], kwargs = {}) {
 }
 
 function mapWorkOrder(row) {
-  const contractor = many2one(row.contractor_id);
-  const project = many2one(row.project_id);
-  const location = many2one(row.project_location);
-  const analytic = many2one(row.analytic_account_id);
   const totalAmount = number(row.total_points);
   const paidAmount = number(row.total_payment);
   const requestedAmount = number(row.total_payment_request);
   const inProcessAmount = Math.max(requestedAmount - paidAmount, 0);
-  const remainingAmount = Math.max(totalAmount - paidAmount - inProcessAmount, 0);
-  return { id: row.id, company: many2one(row.company_id), number: row.work_order_number || row.name || String(row.id), status: row.task_type_work_order || "", statusLabel: statusLabel(row.task_type_work_order), contractor, project, location, costCenterNumber: row.cost_center_number || "", costCenterName: analytic.name, invoiceNumber: row.bill_number || "", contractorBill: row.contractor_bill || "", totalAmount, requestedAmount, inProcessAmount, paidAmount, remainingAmount, date: row.date || "", approvedDate: row.approved_date || "", confirmedDate: row.confirmed_date || "", updatedAt: row.write_date || "", currency: "LYD" };
+  return {
+    id: row.id,
+    company: many2one(row.company_id),
+    number: row.work_order_number || row.name || String(row.id),
+    status: row.task_type_work_order || "",
+    statusLabel: statusLabel(row.task_type_work_order),
+    contractor: many2one(row.contractor_id),
+    project: many2one(row.project_id),
+    location: many2one(row.project_location),
+    costCenterNumber: row.cost_center_number || "",
+    costCenterName: many2one(row.analytic_account_id).name,
+    invoiceNumber: row.bill_number || "",
+    contractorBill: row.contractor_bill || "",
+    totalAmount,
+    requestedAmount,
+    inProcessAmount,
+    paidAmount,
+    remainingAmount: Math.max(totalAmount - paidAmount - inProcessAmount, 0),
+    date: row.date || "",
+    approvedDate: row.approved_date || "",
+    confirmedDate: row.confirmed_date || "",
+    updatedAt: row.write_date || "",
+    currency: "LYD",
+  };
 }
 function totalsFor(rows) {
-  return rows.reduce((acc, order) => { acc.count += 1; acc.totalAmount += order.totalAmount; acc.inProcessAmount += order.inProcessAmount; acc.paidAmount += order.paidAmount; acc.remainingAmount += order.remainingAmount; acc.byStatus[order.status] = acc.byStatus[order.status] || { status: order.status, label: statusLabel(order.status), count: 0 }; acc.byStatus[order.status].count += 1; return acc; }, { count: 0, totalAmount: 0, inProcessAmount: 0, paidAmount: 0, remainingAmount: 0, byStatus: {} });
+  return rows.reduce((acc, order) => {
+    acc.count += 1; acc.totalAmount += order.totalAmount; acc.inProcessAmount += order.inProcessAmount; acc.paidAmount += order.paidAmount; acc.remainingAmount += order.remainingAmount;
+    acc.byStatus[order.status] = acc.byStatus[order.status] || { status: order.status, label: statusLabel(order.status), count: 0 };
+    acc.byStatus[order.status].count += 1;
+    return acc;
+  }, { count: 0, totalAmount: 0, inProcessAmount: 0, paidAmount: 0, remainingAmount: 0, byStatus: {} });
 }
 function rowMatchesText(order, q) {
   if (!q) return true;
   return [order.number, order.invoiceNumber, order.contractorBill, order.project.name, order.location.name, order.costCenterNumber, order.costCenterName].some(v => norm(v).includes(q));
 }
-function rowMatchesFinancial(order, financial) {
-  if (financial === "process") return Number(order.inProcessAmount || 0) > 0;
-  if (financial === "paid") return Number(order.paidAmount || 0) > 0;
-  if (financial === "remaining") return Number(order.remainingAmount || 0) > 0;
-  return true;
+function buildDomainFromUrl(url, extra = []) {
+  const contractorId = Number(url.searchParams.get("contractorId") || 0);
+  const status = url.searchParams.get("status") || "";
+  const project = norm(url.searchParams.get("project"));
+  const costCenter = norm(url.searchParams.get("costCenter"));
+  const domain = baseDomain(extra);
+  if (contractorId) domain.push(["contractor_id", "=", contractorId]);
+  if (status) domain.push(["task_type_work_order", "=", status]);
+  if (project) domain.push(["project_id", "ilike", project]);
+  if (costCenter) domain.push(["cost_center_number", "ilike", costCenter]);
+  return domain;
 }
-function sortRows(rows, sort) {
-  return [...rows].sort((a, b) => {
-    if (sort === "value") return Number(b.totalAmount || 0) - Number(a.totalAmount || 0);
-    if (sort === "remaining") return Number(b.remainingAmount || 0) - Number(a.remainingAmount || 0);
-    if (sort === "paid") return Number(b.paidAmount || 0) - Number(a.paidAmount || 0);
-    return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-  });
-}
-async function fetchAllTaskRows(domain, fields, batchSize = 1000) {
-  const rows = [];
-  for (let offset = 0; ; offset += batchSize) {
-    const page = await odooRead("project.task", "search_read", [domain], { fields, limit: batchSize, offset, order: "id asc" });
-    rows.push(...page);
-    if (page.length < batchSize) break;
-  }
-  return rows;
+function financialExtra(financial) {
+  if (financial === "process") return [["total_payment_request", ">", 0]];
+  if (financial === "paid") return [["total_payment", ">", 0]];
+  if (financial === "remaining") return [["total_points", ">", 0]];
+  return [];
 }
 
 async function resolvePartnerByEmail(email) {
@@ -156,61 +171,38 @@ function requireSession(req) {
   return session;
 }
 function scopedUrl(url, session) { const scoped = new URL(url.toString()); if (session.role === "contractor") scoped.searchParams.set("contractorId", String(session.contractorId)); return scoped; }
-function buildDomainFromUrl(url, extra = []) {
-  const contractorId = Number(url.searchParams.get("contractorId") || 0);
-  const status = url.searchParams.get("status") || "";
-  const project = norm(url.searchParams.get("project"));
-  const costCenter = norm(url.searchParams.get("costCenter"));
-  const domain = baseDomain(extra);
-  if (contractorId) domain.push(["contractor_id", "=", contractorId]);
-  if (status) domain.push(["task_type_work_order", "=", status]);
-  if (project) domain.push(["project_id", "ilike", project]);
-  if (costCenter) domain.push(["cost_center_number", "ilike", costCenter]);
-  return domain;
-}
 
-async function getWorkOrders(url) {
-  const domain = buildDomainFromUrl(url);
-  const rows = await odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit: parseLimit(url), offset: parseOffset(url), order: sortOrder(url.searchParams.get("sort")) });
-  let mapped = rows.map(mapWorkOrder);
+async function getWorkOrders(url, extra = []) {
+  const domain = buildDomainFromUrl(url, extra);
   const q = norm(url.searchParams.get("q"));
-  if (q) mapped = mapped.filter(order => rowMatchesText(order, q));
-  const total = await odooRead("project.task", "search_count", [domain]);
-  return { companyId: config.companyId, total, rows: mapped, loadedAt: new Date().toISOString() };
+  const limit = parseLimit(url);
+  const offset = parseOffset(url);
+  const sort = url.searchParams.get("sort");
+
+  if (!q) {
+    const [total, rows] = await Promise.all([
+      odooRead("project.task", "search_count", [domain]),
+      odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit, offset, order: sortOrder(sort) }),
+    ]);
+    return { companyId: config.companyId, total, rows: rows.map(mapWorkOrder), loadedAt: new Date().toISOString() };
+  }
+
+  const rows = (await odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit: 1000, order: sortOrder(sort) })).map(mapWorkOrder).filter(order => rowMatchesText(order, q));
+  return { companyId: config.companyId, total: rows.length, rows: rows.slice(offset, offset + limit), loadedAt: new Date().toISOString() };
 }
 async function getFinancialOrders(url) {
   const financial = url.searchParams.get("financial") || "all";
-  if (financial === "all") return getWorkOrders(url);
-  const limit = parseLimit(url);
-  const offset = parseOffset(url);
-  const q = norm(url.searchParams.get("q"));
-  const sort = url.searchParams.get("sort");
-  let extra = [];
-  if (financial === "paid") extra = [["total_payment", ">", 0]];
-  if (financial === "process") extra = [["total_payment_request", ">", 0]];
-  if (financial === "remaining") extra = [["total_points", ">", 0]];
-  const domain = buildDomainFromUrl(url, extra);
-
-  if (financial === "paid" && !q && !["remaining"].includes(sort || "")) {
-    const total = await odooRead("project.task", "search_count", [domain]);
-    const rows = await odooRead("project.task", "search_read", [domain], { fields: workOrderFields, limit, offset, order: sortOrder(sort) });
-    return { companyId: config.companyId, total, rows: rows.map(mapWorkOrder), loadedAt: new Date().toISOString(), financial };
-  }
-
-  const cacheKeyValue = { domain, financial, q, sort };
-  const filtered = await cached("financial-orders", cacheKeyValue, async () => {
-    const rows = (await fetchAllTaskRows(domain, workOrderFields)).map(mapWorkOrder)
-      .filter(order => rowMatchesFinancial(order, financial))
-      .filter(order => rowMatchesText(order, q));
-    return sortRows(rows, sort);
-  }, 10 * 60 * 1000);
-  return { companyId: config.companyId, total: filtered.length, rows: filtered.slice(offset, offset + limit), loadedAt: new Date().toISOString(), financial };
+  const result = await getWorkOrders(url, financialExtra(financial));
+  return { ...result, financial };
 }
 async function getDashboard(url) {
   const contractorId = Number(url.searchParams.get("contractorId") || 0);
   const extra = contractorId ? [["contractor_id", "=", contractorId]] : [];
-  const latest = (await odooRead("project.task", "search_read", [baseDomain(extra)], { fields: workOrderFields, limit: 5, order: "write_date desc" })).map(mapWorkOrder);
-  const count = await odooRead("project.task", "search_count", [baseDomain(extra)]);
+  const [latestRows, count] = await Promise.all([
+    odooRead("project.task", "search_read", [baseDomain(extra)], { fields: workOrderFields, limit: 5, order: "write_date desc" }),
+    odooRead("project.task", "search_count", [baseDomain(extra)]),
+  ]);
+  const latest = latestRows.map(mapWorkOrder);
   const totals = totalsFor(latest);
   totals.count = count;
   for (const status of ["draft", "approved", "confirm", "cancel", "done"]) {
@@ -221,7 +213,7 @@ async function getDashboard(url) {
 }
 async function getContractors(url) {
   const q = norm(url.searchParams.get("q"));
-  const groups = await cached("contractors", config.companyId, () => odooRead("project.task", "read_group", [baseDomain([["contractor_id", "!=", false]]), ["contractor_id"], ["contractor_id"]], { lazy: false, limit: 5000 }), 10 * 60 * 1000);
+  const groups = await cached("contractors", () => odooRead("project.task", "read_group", [baseDomain([["contractor_id", "!=", false]]), ["contractor_id"], ["contractor_id"]], { lazy: false, limit: 5000 }), 10 * 60 * 1000);
   let rows = groups.map(group => { const contractor = many2one(group.contractor_id); return { id: contractor.id, name: contractor.name, portalEmail: portalEmailForContractor(contractor.id), workOrders: number(group.contractor_id_count || group.__count) }; }).filter(item => item.id);
   if (q) rows = rows.filter(item => norm(item.name).includes(q) || String(item.id).includes(q));
   rows.sort((a, b) => b.workOrders - a.workOrders);
