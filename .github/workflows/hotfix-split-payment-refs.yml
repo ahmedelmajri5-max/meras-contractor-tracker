@@ -2,80 +2,26 @@ name: Hotfix split payment refs
 
 on:
   push:
-    branches: [main]
-    paths:
-      - .github/workflows/hotfix-split-payment-refs.yml
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Patch app payment split
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('public/app.js')
-          text = path.read_text(encoding='utf-8')
-          anchor = '''function invoiceLink(order) { return order.invoiceLink ? `<a href="${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\\u0641\\u062a\\u062d</a>` : "-"; }
-'''
-          helper = '''function invoiceLink(order) { return order.invoiceLink ? `<a href="${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\\u0641\\u062a\\u062d</a>` : "-"; }
-function splitPaymentRefs(order, paymentRows) {
-  const items = [...new Map((paymentRows || []).map(row => {
-    const ref = String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim();
-    return ref ? [ref, { ref, date: row.payment_date || row.bill_date || row.date || row.write_date || row.create_date || "" }] : null;
-  }).filter(Boolean)).values()];
-  if (!items.length) return { paid: [], process: [], paidDate: "", processDate: "" };
-  const all = items.map(item => item.ref);
-  if (order.paidAmount > 0 && order.inProcessAmount > 0 && items.length > 1) {
-    const processItems = items.slice(-1);
-    const paidItems = items.slice(0, -1);
-    return {
-      paid: paidItems.map(item => item.ref),
-      process: processItems.map(item => item.ref),
-      paidDate: paidItems.map(item => item.date).filter(Boolean).sort().at(-1) || "",
-      processDate: processItems.map(item => item.date).filter(Boolean).sort().at(-1) || "",
-    };
-  }
-  if (order.inProcessAmount > 0 && order.paidAmount <= 0) return { paid: [], process: all, paidDate: "", processDate: items.map(item => item.date).filter(Boolean).sort().at(-1) || "" };
-  if (order.paidAmount > 0) return { paid: all, process: [], paidDate: items.map(item => item.date).filter(Boolean).sort().at(-1) || "", processDate: "" };
-  return { paid: [], process: [], paidDate: "", processDate: "" };
-}
-'''
-          if 'function splitPaymentRefs' not in text:
-              if anchor not in text:
-                  raise SystemExit('invoice anchor not found')
-              text = text.replace(anchor, helper)
-          old = '''    const refsList = [...new Set((payload.rows || []).map(row => String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim()).filter(Boolean))];
-    const latestPaymentDate = (payload.rows || []).map(row => row.payment_date || row.bill_date || row.date || row.write_date || row.create_date).filter(Boolean).sort().at(-1) || "";
-    order.paymentNumbers = refsList;
-    order.inProcessPaymentNumbers = order.inProcessAmount > 0 ? refsList : [];
-    order.paidPaymentNumbers = order.paidAmount > 0 ? refsList : [];
-    order.inProcessDate = order.inProcessAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";
-    order.paidDate = order.paidAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";'''
-          new = '''    const split = splitPaymentRefs(order, payload.rows || []);
-    order.paymentNumbers = [...split.paid, ...split.process];
-    order.inProcessPaymentNumbers = split.process;
-    order.paidPaymentNumbers = split.paid;
-    order.inProcessDate = order.inProcessAmount > 0 ? (split.processDate || order.updatedAt) : "";
-    order.paidDate = order.paidAmount > 0 ? (split.paidDate || order.updatedAt) : "";'''
-          if old in text:
-              text = text.replace(old, new)
-          elif new not in text:
-              raise SystemExit('payment enrich block not found')
-          path.write_text(text, encoding='utf-8')
-          PY
+      - name: Patch app
+        run: node .github/workflows/patch-split-payment-refs.js
       - name: Check syntax
         run: node --check public/app.js
       - name: Commit fix
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git rm .github/workflows/hotfix-split-payment-refs.yml
+          git rm .github/workflows/hotfix-split-payment-refs.yml .github/workflows/patch-split-payment-refs.js
           git add public/app.js
           git commit -m "Split paid and in-process payment references"
           git push
