@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/hotfix-split-payment-refs.yml'
+      - .github/workflows/hotfix-split-payment-refs.yml
 
 permissions:
   contents: write
@@ -17,12 +17,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Patch app payment split
         run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const file = 'public/app.js';
-          let text = fs.readFileSync(file, 'utf8');
-          const anchor = 'function invoiceLink(order) { return order.invoiceLink ? `<a href="${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\\u0641\\u062a\\u062d</a>` : "-"; }\n';
-          const helper = `function invoiceLink(order) { return order.invoiceLink ? \`<a href="\${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\\u0641\\u062a\\u062d</a>\` : "-"; }
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('public/app.js')
+          text = path.read_text(encoding='utf-8')
+          anchor = '''function invoiceLink(order) { return order.invoiceLink ? `<a href="${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\\u0641\\u062a\\u062d</a>` : "-"; }
+'''
+          helper = '''function invoiceLink(order) { return order.invoiceLink ? `<a href="${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\\u0641\\u062a\\u062d</a>` : "-"; }
 function splitPaymentRefs(order, paymentRows) {
   const items = [...new Map((paymentRows || []).map(row => {
     const ref = String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim();
@@ -44,33 +45,36 @@ function splitPaymentRefs(order, paymentRows) {
   if (order.paidAmount > 0) return { paid: all, process: [], paidDate: items.map(item => item.date).filter(Boolean).sort().at(-1) || "", processDate: "" };
   return { paid: [], process: [], paidDate: "", processDate: "" };
 }
-`;
-          if (!text.includes('function splitPaymentRefs')) {
-            if (!text.includes(anchor)) throw new Error('invoice anchor not found');
-            text = text.replace(anchor, helper);
-          }
-          const oldBlock = `    const refsList = [...new Set((payload.rows || []).map(row => String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim()).filter(Boolean))];
+'''
+          if 'function splitPaymentRefs' not in text:
+              if anchor not in text:
+                  raise SystemExit('invoice anchor not found')
+              text = text.replace(anchor, helper)
+          old = '''    const refsList = [...new Set((payload.rows || []).map(row => String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim()).filter(Boolean))];
     const latestPaymentDate = (payload.rows || []).map(row => row.payment_date || row.bill_date || row.date || row.write_date || row.create_date).filter(Boolean).sort().at(-1) || "";
     order.paymentNumbers = refsList;
     order.inProcessPaymentNumbers = order.inProcessAmount > 0 ? refsList : [];
     order.paidPaymentNumbers = order.paidAmount > 0 ? refsList : [];
     order.inProcessDate = order.inProcessAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";
-    order.paidDate = order.paidAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";`;
-          const newBlock = `    const split = splitPaymentRefs(order, payload.rows || []);
+    order.paidDate = order.paidAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";'''
+          new = '''    const split = splitPaymentRefs(order, payload.rows || []);
     order.paymentNumbers = [...split.paid, ...split.process];
     order.inProcessPaymentNumbers = split.process;
     order.paidPaymentNumbers = split.paid;
     order.inProcessDate = order.inProcessAmount > 0 ? (split.processDate || order.updatedAt) : "";
-    order.paidDate = order.paidAmount > 0 ? (split.paidDate || order.updatedAt) : "";`;
-          if (!text.includes(oldBlock) && !text.includes(newBlock)) throw new Error('payment enrich block not found');
-          text = text.replace(oldBlock, newBlock);
-          new Function(text);
-          fs.writeFileSync(file, text);
-          NODE
+    order.paidDate = order.paidAmount > 0 ? (split.paidDate || order.updatedAt) : "";'''
+          if old in text:
+              text = text.replace(old, new)
+          elif new not in text:
+              raise SystemExit('payment enrich block not found')
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Check syntax
+        run: node --check public/app.js
       - name: Commit fix
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git rm .github/workflows/hotfix-split-payment-refs.yml
           git add public/app.js
           git commit -m "Split paid and in-process payment references"
