@@ -8,6 +8,7 @@ const state = {
   page: 1,
   pageSize: 25,
   financialFilter: "all",
+  orderLoadSeq: 0,
   contractors: [],
 };
 
@@ -67,7 +68,11 @@ function renderMetricCards(totals, statusCounts = {}) {
 }
 function setFinancialFilter(filter) {
   state.financialFilter = filter;
-  document.querySelectorAll("[data-financial-filter]").forEach(button => button.classList.toggle("active", button.dataset.financialFilter === filter));
+  document.querySelectorAll("[data-financial-filter]").forEach(button => {
+    const active = button.dataset.financialFilter === filter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 function financialFilterLabel() {
   return ({ all: "كل أوامر العمل", process: "أوامر تحت الإجراء", paid: "أوامر مدفوعة", remaining: "أوامر فيها متبقي" })[state.financialFilter] || "كل أوامر العمل";
@@ -83,6 +88,14 @@ function setLoggedIn(session) {
   els.appRoot.classList.remove("hidden");
   els.currentSession.textContent = state.admin ? "الأدمن" : state.contractorName;
   document.querySelectorAll(".admin-only").forEach(el => el.style.display = state.admin ? "" : "none");
+}
+function setOrdersLoading(isLoading) {
+  els.financialFilterTabs.classList.toggle("loading", isLoading);
+  document.querySelectorAll("[data-financial-filter], #prevPageBtn, #nextPageBtn").forEach(button => button.disabled = isLoading);
+  if (!isLoading) return;
+  els.pageInfo.textContent = `جاري تجهيز ${financialFilterLabel()}...`;
+  els.ordersRows.innerHTML = `<tr><td colspan="11" class="orders-loading">جاري تحديث أوامر العمل...</td></tr>`;
+  els.ordersCards.innerHTML = `<div class="orders-loading">جاري تحديث أوامر العمل...</div>`;
 }
 function logout() {
   localStorage.removeItem("merasTrackerSession");
@@ -120,28 +133,37 @@ async function refreshAll() {
 }
 async function loadDashboard() {
   const payload = await api("/api/dashboard");
-  renderMetricCards({ ...payload.totals, totalAmount: "loading", inProcessAmount: "loading", paidAmount: "loading", remainingAmount: "loading" }, payload.totals.byStatus);
+  renderMetricCards(payload.totals, payload.totals.byStatus);
   els.latestOrders.innerHTML = payload.latest.map(order => `<button class="mini-order" data-open-order="${order.id}"><strong>${escapeHtml(order.number)} ${statusChip(order)}</strong><small>${escapeHtml(order.project.name)} - ${escapeHtml(order.location.name || "-")}</small>${moneyRow(order)}</button>`).join("") || `<div class="alert">لا توجد أوامر عمل.</div>`;
   const alerts = payload.latest.filter(order => order.remainingAmount > 0 || order.inProcessAmount > 0).slice(0, 6);
   els.alerts.innerHTML = alerts.map(order => `<div class="alert"><b>${escapeHtml(order.number)}</b><small>${order.inProcessAmount > 0 ? `تحت الإجراء: ${fmt(order.inProcessAmount)}` : `متبقي: ${fmt(order.remainingAmount)}`}</small></div>`).join("") || `<div class="alert">لا توجد تنبيهات في آخر الأوامر.</div>`;
   els.lastLoaded.textContent = `آخر قراءة: ${fmtDate(payload.loadedAt)}`;
 }
 async function loadOrders() {
+  const seq = ++state.orderLoadSeq;
+  setOrdersLoading(true);
   const offset = (state.page - 1) * state.pageSize;
   const endpoint = state.financialFilter === "all" ? "/api/work-orders" : "/api/work-orders-financial";
-  const payload = await api(params(endpoint, {
-    q: els.searchInput.value.trim(),
-    status: els.statusFilter.value,
-    project: els.projectFilter.value.trim(),
-    costCenter: els.costCenterFilter.value.trim(),
-    sort: els.sortFilter.value,
-    financial: state.financialFilter,
-    limit: state.pageSize,
-    offset,
-  }));
-  state.orders = payload.rows || [];
-  state.total = payload.total || 0;
-  renderOrders(financialFilterLabel());
+  try {
+    const payload = await api(params(endpoint, {
+      q: els.searchInput.value.trim(),
+      status: els.statusFilter.value,
+      project: els.projectFilter.value.trim(),
+      costCenter: els.costCenterFilter.value.trim(),
+      sort: els.sortFilter.value,
+      financial: state.financialFilter,
+      limit: state.pageSize,
+      offset,
+    }));
+    if (seq !== state.orderLoadSeq) return;
+    state.orders = payload.rows || [];
+    state.total = payload.total || 0;
+    renderOrders(financialFilterLabel());
+  } catch (error) {
+    if (seq === state.orderLoadSeq) setNotice(error.message, "error");
+  } finally {
+    if (seq === state.orderLoadSeq) setOrdersLoading(false);
+  }
 }
 function renderOrders(scopeLabel = "") {
   els.ordersRows.innerHTML = state.orders.map(order => `<tr><td><button class="linkish" data-open-order="${order.id}">${escapeHtml(order.number)}</button></td><td>${statusChip(order)}</td><td>${escapeHtml(order.project.name)}</td><td>${escapeHtml(order.location.name || "-")}</td><td>${escapeHtml(order.costCenterNumber)}<br><small>${escapeHtml(order.costCenterName)}</small></td><td>${escapeHtml(order.invoiceNumber || order.contractorBill || "-")}</td><td class="amount">${fmt(order.totalAmount)}</td><td class="amount">${fmt(order.inProcessAmount)}</td><td class="amount">${fmt(order.paidAmount)}</td><td class="amount">${fmt(order.remainingAmount)}</td><td>${fmtDate(order.updatedAt)}</td></tr>`).join("");
@@ -179,7 +201,12 @@ function exportEmails() {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a"); link.href = url; link.download = "meras-contractor-emails.csv"; link.click(); URL.revokeObjectURL(url);
 }
-function refilterOrders() { state.page = 1; loadOrders(); }
+let filterTimer = null;
+function refilterOrders() { state.page = 1; return loadOrders(); }
+function scheduleRefilterOrders() {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(refilterOrders, 300);
+}
 
 document.querySelectorAll(".nav-item").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 els.authLoginBtn.addEventListener("click", loginByEmail);
@@ -199,10 +226,8 @@ els.financialFilterTabs.addEventListener("click", event => {
   setFinancialFilter(button.dataset.financialFilter);
   refilterOrders();
 });
-[els.searchInput, els.statusFilter, els.projectFilter, els.costCenterFilter, els.sortFilter].forEach(control => {
-  control.addEventListener("input", refilterOrders);
-  control.addEventListener("change", refilterOrders);
-});
+[els.searchInput, els.projectFilter, els.costCenterFilter].forEach(control => control.addEventListener("input", scheduleRefilterOrders));
+[els.statusFilter, els.sortFilter].forEach(control => control.addEventListener("change", refilterOrders));
 document.body.addEventListener("click", event => { const open = event.target.closest("[data-open-order]"); if (open) openOrder(open.dataset.openOrder); });
 
 (async function init() {
