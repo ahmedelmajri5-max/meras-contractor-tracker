@@ -73,7 +73,7 @@ async function enrichOrdersWithPayments(rows) {
     order.inProcessPaymentNumbers = order.inProcessAmount > 0 ? refsList : [];
     order.paidPaymentNumbers = order.paidAmount > 0 ? refsList : [];
     order.inProcessDate = order.inProcessAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";
-    order.paidDate = order.paidAmount > 0 ? order.updatedAt : "";
+    order.paidDate = order.paidAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";
   }));
   return rows;
 }
@@ -150,10 +150,10 @@ async function loginByEmail() {
   } catch (error) { setAuthError(error.message); }
 }
 async function refreshAll() {
-  try {
-    state.page = 1;
-    await Promise.all([loadDashboard(), loadOrders()]);
-  } catch (error) { setNotice(error.message, "error"); }
+  state.page = 1;
+  const results = await Promise.allSettled([loadDashboard(), loadOrders()]);
+  const failed = results.find(result => result.status === "rejected");
+  if (failed) setNotice(`${failed.reason.message} - تم تحميل الجزء المتاح، حاول التحديث مرة ثانية.`, "error");
 }
 async function loadDashboard() {
   const payload = await api("/api/dashboard");
