@@ -1,0 +1,72 @@
+name: Patch vendor reference invoice links
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply vendor_reference invoice links') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Patch files
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          function replaceOnce(file, from, to) {
+            let s = fs.readFileSync(file, 'utf8');
+            if (!s.includes(from)) {
+              throw new Error(`${file}: pattern not found`);
+            }
+            s = s.replace(from, to);
+            fs.writeFileSync(file, s);
+          }
+
+          replaceOnce(
+            'server.js',
+            '"bill_number", "contractor_bill", "total_points"',
+            '"bill_number", "contractor_bill", "vendor_reference", "total_points"'
+          );
+          replaceOnce(
+            'server.js',
+            'invoiceNumber: row.bill_number || "", contractorBill: row.contractor_bill || "", ...a',
+            'invoiceNumber: row.bill_number || "", invoiceLink: text(row.vendor_reference), vendorReference: text(row.vendor_reference), contractorBill: row.contractor_bill || "", ...a'
+          );
+
+          let app = fs.readFileSync('public/app.js', 'utf8');
+          app = app.replace(/function invoiceLink\(order\) \{ return order\.invoiceLink \? `<a href="\$\{escapeHtml\(order\.invoiceLink\)\}" target="_blank" rel="noreferrer">(.+?)<\/a>` : "-"; \}/, `function linkHref(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^(https?:)?\\/\\//i.test(raw) || /^(mailto|tel):/i.test(raw)) return raw;
+  return \`https://\${raw}\`;
+}
+function invoiceLink(order) {
+  const href = linkHref(order.invoiceLink || order.vendorReference);
+  return href ? \`<a href="\${escapeHtml(href)}" target="_blank" rel="noreferrer">فتح</a>\` : "-";
+}`);
+          if (!app.includes('function linkHref(value)')) throw new Error('public/app.js: invoiceLink patch failed');
+          app = app.replace('order.invoiceLink ? "\\u0645\\u062a\\u0627\\u062d" : "-"', 'invoiceLink(order)');
+          fs.writeFileSync('public/app.js', app);
+
+          fs.rmSync('.github/workflows/vendor-reference-patch.yml', { force: true });
+          NODE
+      - name: Verify syntax
+        run: |
+          node --check server.js
+          node --check public/app.js
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/app.js .github/workflows/vendor-reference-patch.yml
+          git commit -m "Apply vendor_reference invoice links"
+          git push
