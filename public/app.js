@@ -64,16 +64,36 @@ function metric(label, value, color = "") { return `<article class="metric ${col
 function moneyRow(order) { return `<div class="money-row"><span>\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a <b>${fmt(order.totalAmount)}</b></span><span>\u062a\u062d\u062a \u0627\u0644\u0625\u062c\u0631\u0627\u0621 <b>${fmt(order.inProcessAmount)}</b></span><span>\u0627\u0644\u0645\u062f\u0641\u0648\u0639 <b>${fmt(order.paidAmount)}</b></span><span>\u0627\u0644\u0645\u062a\u0628\u0642\u064a <b>${fmt(order.remainingAmount)}</b></span></div>`; }
 function refs(value) { const list = Array.isArray(value) ? value : []; return list.length ? list.map(item => `<span>${escapeHtml(item)}</span>`).join("") : "-"; }
 function invoiceLink(order) { return order.invoiceLink ? `<a href="${escapeHtml(order.invoiceLink)}" target="_blank" rel="noreferrer">\u0641\u062a\u062d</a>` : "-"; }
+function splitPaymentRefs(order, paymentRows) {
+  const items = [...new Map((paymentRows || []).map(row => {
+    const ref = String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim();
+    return ref ? [ref, { ref, date: row.payment_date || row.bill_date || row.date || row.write_date || row.create_date || "" }] : null;
+  }).filter(Boolean)).values()];
+  if (!items.length) return { paid: [], process: [], paidDate: "", processDate: "" };
+  const all = items.map(item => item.ref);
+  if (order.paidAmount > 0 && order.inProcessAmount > 0 && items.length > 1) {
+    const processItems = items.slice(-1);
+    const paidItems = items.slice(0, -1);
+    return {
+      paid: paidItems.map(item => item.ref),
+      process: processItems.map(item => item.ref),
+      paidDate: paidItems.map(item => item.date).filter(Boolean).sort().at(-1) || "",
+      processDate: processItems.map(item => item.date).filter(Boolean).sort().at(-1) || "",
+    };
+  }
+  if (order.inProcessAmount > 0 && order.paidAmount <= 0) return { paid: [], process: all, paidDate: "", processDate: items.map(item => item.date).filter(Boolean).sort().at(-1) || "" };
+  if (order.paidAmount > 0) return { paid: all, process: [], paidDate: items.map(item => item.date).filter(Boolean).sort().at(-1) || "", processDate: "" };
+  return { paid: [], process: [], paidDate: "", processDate: "" };
+}
 async function enrichOrdersWithPayments(rows) {
   await Promise.all(rows.map(async order => {
     const payload = await api(params("/api/payments", { taskId: order.id })).catch(() => ({ rows: [] }));
-    const refsList = [...new Set((payload.rows || []).map(row => String(row.payment_reference || row.name || row.display_name || row.payment_number || row.id || "").trim()).filter(Boolean))];
-    const latestPaymentDate = (payload.rows || []).map(row => row.payment_date || row.bill_date || row.date || row.write_date || row.create_date).filter(Boolean).sort().at(-1) || "";
-    order.paymentNumbers = refsList;
-    order.inProcessPaymentNumbers = order.inProcessAmount > 0 ? refsList : [];
-    order.paidPaymentNumbers = order.paidAmount > 0 ? refsList : [];
-    order.inProcessDate = order.inProcessAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";
-    order.paidDate = order.paidAmount > 0 ? (latestPaymentDate || order.updatedAt) : "";
+    const split = splitPaymentRefs(order, payload.rows || []);
+    order.paymentNumbers = [...split.paid, ...split.process];
+    order.inProcessPaymentNumbers = split.process;
+    order.paidPaymentNumbers = split.paid;
+    order.inProcessDate = order.inProcessAmount > 0 ? (split.processDate || order.updatedAt) : "";
+    order.paidDate = order.paidAmount > 0 ? (split.paidDate || order.updatedAt) : "";
   }));
   return rows;
 }
