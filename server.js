@@ -11,6 +11,7 @@ const cache = new Map();
 const CACHE_MS = Number(process.env.ODOO_CACHE_MS || 2 * 60 * 1000);
 const RPC_TIMEOUT_MS = Number(process.env.ODOO_RPC_TIMEOUT_MS || 8000);
 const LIGHT_CHUNK_SIZE = Number(process.env.ODOO_LIGHT_CHUNK_SIZE || 50);
+const LIGHT_CHUNK_CONCURRENCY = Number(process.env.ODOO_LIGHT_CHUNK_CONCURRENCY || 6);
 const TOKEN_SECRET = config.apiKey || "meras-contractor-tracker";
 const workOrderFields = ["id", "company_id", "name", "work_order_number", "task_type_work_order", "contractor_id", "project_id", "project_location", "cost_center_number", "analytic_account_id", "bill_number", "contractor_bill", "total_points", "total_payment", "total_payment_request", "date", "approved_date", "confirmed_date", "write_date"];
 const lightFields = ["id", "total_points", "total_payment", "total_payment_request", "write_date"];
@@ -42,12 +43,19 @@ function totalsFromLightRows(rows) { return rows.reduce((acc, row) => { const a 
 async function getLightRows(domain) {
   return cached(`lightRows:${JSON.stringify(domain)}`, async () => {
     const total = await odooRead("project.task", "search_count", [domain]);
-    const rows = [];
-    for (let offset = 0; offset < total; offset += LIGHT_CHUNK_SIZE) {
-      const chunk = await odooRead("project.task", "search_read", [domain], { fields: lightFields, limit: LIGHT_CHUNK_SIZE, offset, order: "id asc" });
-      rows.push(...chunk);
+    const offsets = [];
+    for (let offset = 0; offset < total; offset += LIGHT_CHUNK_SIZE) offsets.push(offset);
+    const chunks = new Array(offsets.length);
+    let cursor = 0;
+    async function worker() {
+      while (cursor < offsets.length) {
+        const index = cursor;
+        cursor += 1;
+        chunks[index] = await odooRead("project.task", "search_read", [domain], { fields: lightFields, limit: LIGHT_CHUNK_SIZE, offset: offsets[index], order: "id asc" });
+      }
     }
-    return rows;
+    await Promise.all(Array.from({ length: Math.min(LIGHT_CHUNK_CONCURRENCY, offsets.length) }, worker));
+    return chunks.flat();
   }, 10 * 60 * 1000);
 }
 async function getFinancialTotals(domain) { return totalsFromLightRows(await getLightRows(domain)); }
